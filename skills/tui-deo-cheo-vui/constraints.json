@@ -1,0 +1,11 @@
+{
+  "min_duration_seconds": 18,
+  "max_duration_seconds": 20,
+  "hook_max_words": 12,
+  "unique_hooks": true,
+  "words_per_second": 4.0,
+  "enforce_duration": true,
+  "one_paragraph": true,
+  "allow_hashtags": false,
+  "allow_emoji": false
+}

@@ -13,7 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.db.session import SessionLocal
-from app.models import Asset, Job, Project, Sequence, SequenceItem
+from app.models import Asset, BgmTrack, Job, Project, Sequence, SequenceItem
 from app.services.media_probe import probe
 from app.services.render_service import RenderOptions, build_ffmpeg_command, run_ffmpeg, verify_output
 from app.services.storage_service import (
@@ -312,7 +312,12 @@ class JobManager:
             if not sequence:
                 raise ValueError("Sequence was not found")
             audio = db.get(Asset, payload.get("audio_asset_id")) if payload.get("audio_asset_id") else None
-            bgm = db.get(Asset, payload.get("bgm_asset_id")) if payload.get("bgm_asset_id") else None
+            bgm_id = payload.get("bgm_asset_id")
+            bgm = None
+            if bgm_id:
+                bgm = db.get(Asset, bgm_id)
+                if not bgm:
+                    bgm = db.get(BgmTrack, bgm_id)  # fallback to global library
             root = create_project_dirs(job.project_id)
             timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
             project = db.get(Project, job.project_id)

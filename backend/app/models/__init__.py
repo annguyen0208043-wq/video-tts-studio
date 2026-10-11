@@ -1,4 +1,4 @@
-from .entities import Asset, Job, Project, Sequence, SequenceItem
+from .entities import Asset, BgmTrack, Job, Project, Sequence, SequenceItem
 
-__all__ = ["Project", "Asset", "Sequence", "SequenceItem", "Job"]
+__all__ = ["Project", "Asset", "Sequence", "SequenceItem", "Job", "BgmTrack"]
 

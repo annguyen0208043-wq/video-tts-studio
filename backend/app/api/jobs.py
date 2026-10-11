@@ -50,7 +50,6 @@ def create_tts_job(project_id: str, payload: TTSJobCreate, db: Session = Depends
     if not db.get(Project, project_id):
         raise HTTPException(404, "Project was not found")
     values = payload.model_dump()
-    values["group_name"] = None
     values["name"] = _next_tts_name(db, project_id, payload.name)
     return _queue_tts_jobs(db, project_id, [values])[0]
 

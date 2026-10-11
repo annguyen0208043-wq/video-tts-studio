@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
-from app.api import assets, jobs, projects, sequences, system
+from app.api import assets, bgm, jobs, projects, scripts, sequences, system
 from app.core.config import ROOT_DIR, settings
 from app.core.logging import configure_logging
 from app.db.session import Base, SessionLocal, engine
@@ -52,6 +52,8 @@ app.include_router(projects.router, prefix="/api")
 app.include_router(assets.router, prefix="/api")
 app.include_router(sequences.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")
+app.include_router(scripts.router, prefix="/api")
+app.include_router(bgm.router, prefix="/api")
 
 
 @app.get("/api/health")

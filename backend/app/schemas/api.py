@@ -169,3 +169,42 @@ class JobOut(ORMModel):
     log_path: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class ScriptGenerate(BaseModel):
+    product_info: str = Field(min_length=3, max_length=20_000)
+    skill_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
+    provider: str = "auto"
+    count: int = Field(default=5, ge=1, le=100)
+    duration_min: int = Field(default=18, ge=5, le=120)
+    duration_max: int = Field(default=20, ge=5, le=120)
+
+
+class GeneratedScript(BaseModel):
+    index: int
+    text: str
+    estimated_duration_seconds: float
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ScriptGenerateOut(BaseModel):
+    provider_used: str
+    model_used: str
+    scripts: list[GeneratedScript]
+
+
+class BgmTrackOut(ORMModel):
+    id: str
+    display_name: str
+    relative_path: str
+    duration_ms: int | None
+    codec: str | None
+    tags: str | None
+    file_size: int | None
+    created_at: datetime
+
+
+class BgmTrackUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    tags: str | None = None
+

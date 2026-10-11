@@ -29,7 +29,7 @@ def test_excel_groups_and_manual_text(monkeypatch):
         assert upload(payload).status_code == 409
         single = client.post(f'/api/projects/{project}/tts/jobs', json=payload)
         assert single.status_code == 202
-        assert single.json()['input_json']['group_name'] is None
+        assert single.json()['input_json']['group_name'] == '9-27-1'
 
 
 def test_render_requires_explicit_audio_exceptions(monkeypatch):

@@ -23,6 +23,12 @@ PROJECT_SUBDIRS = (
 def ensure_storage() -> None:
     settings.projects_dir.mkdir(parents=True, exist_ok=True)
     settings.log_dir.mkdir(parents=True, exist_ok=True)
+    bgm_library_dir().mkdir(parents=True, exist_ok=True)
+
+
+def bgm_library_dir() -> Path:
+    """Return the global BGM library directory (not per-project)."""
+    return (settings.data_dir / "bgm_library").resolve()
 
 
 def project_dir(project_id: str) -> Path:

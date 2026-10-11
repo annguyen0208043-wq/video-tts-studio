@@ -1,0 +1,7 @@
+{
+  "min_duration_seconds": 18,
+  "max_duration_seconds": 20,
+  "one_paragraph": true,
+  "allow_hashtags": false,
+  "allow_emoji": false
+}

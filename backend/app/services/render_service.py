@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from app.models import Asset, Sequence
+from app.models import Asset, BgmTrack, Sequence
 from app.services.media_probe import probe
-from app.services.storage_service import resolve_asset_path
+from app.services.storage_service import bgm_library_dir, resolve_asset_path
 
 
 @dataclass
@@ -50,13 +50,20 @@ def _expanded_assets(sequence: Sequence, audio: Asset | None, policy: str) -> li
     return assets * repeats
 
 
+def _resolve_bgm_path(project_id: str, bgm: Asset | BgmTrack) -> Path:
+    """Resolve the file path for a BGM, whether it's a project Asset or global BgmTrack."""
+    if isinstance(bgm, BgmTrack):
+        return bgm_library_dir() / bgm.relative_path
+    return resolve_asset_path(project_id, bgm.relative_path)
+
+
 def build_ffmpeg_command(
     project_id: str,
     sequence: Sequence,
     audio: Asset | None,
     output_partial: Path,
     options: RenderOptions,
-    bgm: Asset | None = None,
+    bgm: Asset | BgmTrack | None = None,
 ) -> tuple[list[str], float]:
     if options.duration_policy not in {"match_audio_loop_video", "match_video", "shortest"}:
         raise ValueError("Duration policy không hợp lệ")
@@ -89,7 +96,7 @@ def build_ffmpeg_command(
         bgm_index = len(assets) + (1 if audio else 0)
         if options.bgm_loop:
             command.extend(["-stream_loop", "-1"])
-        command.extend(["-i", str(resolve_asset_path(project_id, bgm.relative_path))])
+        command.extend(["-i", str(_resolve_bgm_path(project_id, bgm))])
 
     filters: list[str] = []
     concat_inputs: list[str] = []

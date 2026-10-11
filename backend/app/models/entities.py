@@ -99,3 +99,16 @@ class Job(Base, TimestampMixin):
 
     project: Mapped[Project] = relationship(back_populates="jobs")
     output_asset: Mapped[Asset | None] = relationship(foreign_keys=[output_asset_id])
+
+
+class BgmTrack(Base, TimestampMixin):
+    """Global background music library — not tied to any project."""
+    __tablename__ = "bgm_tracks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_string)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    duration_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    codec: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tags: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

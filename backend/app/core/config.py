@@ -34,6 +34,17 @@ class Settings:
     max_sequence_outputs: int = int(os.getenv("MAX_SEQUENCE_OUTPUTS", "100"))
     max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "4096"))
     max_concurrent_jobs: int = int(os.getenv("MAX_CONCURRENT_JOBS", "3"))
+    skills_dir: Path = _resolve_path(os.getenv("SKILLS_DIR", "./skills"), "./skills")
+    ai_default_provider: str = os.getenv("AI_DEFAULT_PROVIDER", "auto").lower()
+    ai_timeout_seconds: float = float(os.getenv("AI_TIMEOUT_SECONDS", "30"))
+    ai_max_retries: int = int(os.getenv("AI_MAX_RETRIES", "1"))
+    ai_cooldown_seconds: int = int(os.getenv("AI_COOLDOWN_SECONDS", "60"))
+    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "")
+    groq_api_key: str = os.getenv("GROQ_API_KEY", "")
+    groq_model: str = os.getenv("GROQ_MODEL", "")
+    openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
+    openrouter_model: str = os.getenv("OPENROUTER_MODEL", "")
 
     @property
     def projects_dir(self) -> Path:

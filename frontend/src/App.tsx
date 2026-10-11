@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, AudioLines, CheckCircle2, Clapperboard, Download, Eye, FolderOpen, Layers3,
-  LoaderCircle, Music, Pause, Play, Plus, RefreshCw, Scissors, Sparkles, Trash2,
+  Activity, AudioLines, Bot, CheckCircle2, Clapperboard, Download, Eye, FolderOpen, Layers3,
+  LoaderCircle, MousePointer2, Music, Pause, Play, Plus, RefreshCw, Scissors, Sparkles, Trash2,
   Upload, Volume2, VolumeX, Wand2, X, XCircle,
 } from 'lucide-react'
-import { jsonOptions, request, streamUrl, thumbnailUrl } from './api'
-import type { Asset, Job, Project, VideoSequence } from './types'
+import { bgmStreamUrl, jsonOptions, request, streamUrl, thumbnailUrl } from './api'
+import type { AIProvider, AISkill, Asset, BgmTrack, GeneratedScript, Job, Project, ScriptGenerateResult, VideoSequence } from './types'
 
-type Tab = 'media' | 'voice' | 'sequence' | 'render' | 'jobs'
+type Tab = 'media' | 'scripts' | 'voice' | 'sequence' | 'render' | 'jobs'
+type SidebarState = 'open' | 'closed'
 type Guard = (action: () => Promise<void>) => Promise<void>
 type BatchDraft = { id: string; name: string; selected: string[]; mode: string; k: number; manual: string[] }
 type Assignment = {
@@ -51,6 +52,7 @@ export default function App() {
   const [system, setSystem] = useState<any>(null)
   const [tab, setTab] = useState<Tab>('media')
   const [error, setError] = useState('')
+  const [sidebarOpen, setSidebarOpen] = useState(true)
   const jobsRef = useRef<Job[]>([])
   const assetsRef = useRef<Asset[]>([])
   const jobsRefreshInFlight = useRef(false)
@@ -134,12 +136,12 @@ export default function App() {
     })
   }
   const nav: Array<[Tab, string, any]> = [
-    ['media', 'Media', FolderOpen], ['voice', 'Tạo giọng', AudioLines],
+    ['media', 'Media', FolderOpen], ['scripts', 'AI viết kịch bản', Bot], ['voice', 'Tạo giọng', AudioLines],
     ['sequence', 'Batch video', Layers3], ['render', 'Gán audio & xuất', Clapperboard],
     ['jobs', 'Công việc', Activity],
   ]
 
-  return <div className="app-shell">
+  return <div className={`app-shell${sidebarOpen ? '' : ' sidebar-collapsed'}`}>
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><Play size={20} fill="currentColor" /></div><div><strong>Video TTS</strong><span>Studio</span></div></div>
       <label className="mini-label">PROJECT HIỆN TẠI</label>
@@ -153,10 +155,23 @@ export default function App() {
       </div>
     </aside>
     <main>
-      <header><div><h1>{project?.name || 'Video TTS Studio'}</h1><p>Tạo giọng, chia batch video và xuất hàng loạt.</p></div><div className="header-actions">{project && <><button className="secondary" onClick={renameProject}>Đổi tên</button><button className="danger-button" onClick={deleteProject}><Trash2 size={16} /> Xóa</button></>}<button className="icon-button" onClick={refreshProjectData}><RefreshCw size={18} /></button></div></header>
+      <div className="topbar">
+        <button className="topbar-toggle" onClick={() => setSidebarOpen(v => !v)} title={sidebarOpen ? 'Ẩn sidebar' : 'Hiện sidebar'}>
+          {sidebarOpen ? <X size={18} /> : <Layers3 size={18} />}
+        </button>
+        <span className="topbar-title">{project?.name || 'Video TTS Studio'}</span>
+        <div className="topbar-actions">
+          {project && <>
+            <button className="secondary" onClick={renameProject}>Đổi tên</button>
+            <button className="danger-button" onClick={deleteProject}><Trash2 size={16} /> Xóa</button>
+          </>}
+          <button className="icon-button" onClick={refreshProjectData}><RefreshCw size={18} /></button>
+        </div>
+      </div>
       {error && <ErrorBanner message={error} clear={() => setError('')} />}
       {!projectId ? <Empty title="Bắt đầu bằng một project" text="Tạo project để quản lý từng chiến dịch video." action={<button onClick={createProject}><Plus size={16} /> Tạo project</button>} /> : <>
         {tab === 'media' && <MediaPanel projectId={projectId} assets={assets} refresh={refreshProjectData} guarded={guarded} />}
+        {tab === 'scripts' && <AIScriptPanel key={projectId} projectId={projectId} guarded={guarded} refresh={refreshProjectData} />}
         {tab === 'voice' && <VoicePanel projectId={projectId} audios={audios} jobs={jobs} guarded={guarded} />}
         {tab === 'sequence' && <SequencePanel projectId={projectId} videos={videos} sequences={sequences} refresh={refreshProjectData} guarded={guarded} />}
         {tab === 'render' && <RenderPanel key={projectId} projectId={projectId} audios={audios} sequences={sequences} outputs={outputs} system={system} guarded={guarded} setTab={setTab} refresh={refreshProjectData} />}
@@ -164,6 +179,247 @@ export default function App() {
       </>}
     </main>
   </div>
+}
+
+function AIScriptPanel({ projectId, guarded, refresh }: { projectId: string; guarded: Guard; refresh: () => Promise<void> }) {
+  const [skills, setSkills] = useState<AISkill[]>([])
+  const [providers, setProviders] = useState<AIProvider[]>([])
+  const [productInfo, setProductInfo] = useState('')
+  const [skillId, setSkillId] = useState('')
+  const [provider, setProvider] = useState('auto')
+  const [count, setCount] = useState(5)
+  const [durationMin, setDurationMin] = useState(18)
+  const [durationMax, setDurationMax] = useState(20)
+  const draftKey = `ai-script-drafts:${projectId}`
+  const [scripts, setScripts] = useState<GeneratedScript[]>(() => {
+    try { return JSON.parse(localStorage.getItem(draftKey) || '[]') } catch { return [] }
+  })
+  const [selected, setSelected] = useState<number[]>([])
+  const [providerUsed, setProviderUsed] = useState('')
+  const [modelUsed, setModelUsed] = useState('')
+  const [generating, setGenerating] = useState(false)
+  const [creatingVoice, setCreatingVoice] = useState(false)
+  const [voices, setVoices] = useState<Array<{label:string;id:string}>>([])
+  const [voice, setVoice] = useState('')
+  const [device, setDevice] = useState('cuda')
+  const [audioName, setAudioName] = useState('kich-ban-ai')
+  const [groupName, setGroupName] = useState('AI kịch bản')
+  const [speed, setSpeed] = useState(1)
+  const [queueProgress, setQueueProgress] = useState('')
+
+  useEffect(() => { localStorage.setItem(draftKey, JSON.stringify(scripts)) }, [draftKey, scripts])
+
+  useEffect(() => {
+    Promise.all([
+      request<AISkill[]>('/ai/skills'),
+      request<{providers: AIProvider[]}>('/ai/providers'),
+      request<Array<{label:string;id:string}>>('/system/tts/voices'),
+    ]).then(([skillRows, providerRows, voiceRows]) => {
+      setSkills(skillRows); setProviders(providerRows.providers); setVoices(voiceRows)
+      if (skillRows[0]) setSkillId(current => current || skillRows[0].id)
+      if (voiceRows[0]) setVoice(current => current || voiceRows[0].id)
+    }).catch(() => {})
+  }, [])
+
+  async function generate() {
+    if (scripts.length && !confirm(`Tạo mới sẽ thay thế ${scripts.length} bản nháp hiện tại. Tiếp tục?`)) return
+    await guarded(async () => {
+      setGenerating(true)
+      try {
+        const result = await request<ScriptGenerateResult>(`/projects/${projectId}/scripts/generate`, jsonOptions('POST', {
+          product_info: productInfo, skill_id: skillId, provider, count,
+          duration_min: durationMin, duration_max: durationMax,
+        }))
+        setScripts(result.scripts); setSelected(result.scripts.map(item => item.index))
+        setProviderUsed(result.provider_used); setModelUsed(result.model_used)
+      } finally { setGenerating(false) }
+    })
+  }
+
+  function patchText(index: number, text: string, el?: HTMLTextAreaElement) {
+    if (el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px' }
+    setScripts(old => old.map(item => item.index === index ? { ...item, text, estimated_duration_seconds: Math.round(text.trim().split(/\s+/).filter(Boolean).length / 4 * 10) / 10 } : item))
+  }
+
+  function addScript() {
+    const index = Math.max(0, ...scripts.map(item => item.index)) + 1
+    setScripts(old => [...old, { index, text: '', estimated_duration_seconds: 0, warnings: [] }])
+    setSelected(old => [...old, index])
+  }
+
+  function removeScript(index: number) {
+    if (!confirm(`Xóa kịch bản ${index}?`)) return
+    setScripts(old => old.filter(item => item.index !== index))
+    setSelected(old => old.filter(value => value !== index))
+  }
+
+  function clearScripts() {
+    if (!scripts.length || !confirm(`Xóa toàn bộ ${scripts.length} bản nháp?`)) return
+    setScripts([]); setSelected([]); setProviderUsed(''); setModelUsed('')
+  }
+
+  async function createVoices(indexes = selected) {
+    const chosen = scripts.filter(item => indexes.includes(item.index) && item.text.trim())
+    if (!chosen.length) return
+    const cleanGroup = groupName.trim()
+    if (!cleanGroup) { alert('Hãy nhập tên nhóm audio trước khi tạo giọng.'); return }
+    if (!confirm(`Tạo nhóm “${cleanGroup}” gồm ${chosen.length} audio, tốc độ ${speed.toFixed(1)}×?`)) return
+    await guarded(async () => {
+      setCreatingVoice(true)
+      try {
+        for (let position = 0; position < chosen.length; position++) {
+          const item = chosen[position]
+          setQueueProgress(`${position + 1}/${chosen.length}`)
+          await request(`/projects/${projectId}/tts/jobs`, jsonOptions('POST', {
+            text: item.text.trim(), voice, device, name: `${audioName}-${item.index}`,
+            group_name: cleanGroup, output_format: 'mp3', use_batch: true,
+            batch_size: 16, temperature: .8, max_chars: 256, top_k: 25,
+            top_p: .95, repetition_penalty: 1.2, silence_p: .15, speed,
+          }))
+        }
+        await refresh()
+      } finally { setCreatingVoice(false); setQueueProgress('') }
+    })
+  }
+
+  const configured = providers.filter(item => item.configured)
+  const allSelected = scripts.length > 0 && selected.length === scripts.length
+  return <section className="ai-section-full">
+    <div className="ai-studio-grid">
+      <aside className="panel ai-setup-sidebar">
+        <div className="ai-sidebar-title"><Wand2 size={17}/><strong>Tạo kịch bản</strong><i className={configured.length?'ready':''}/></div>
+        <label>Mô tả sản phẩm</label><textarea rows={6} value={productInfo} onChange={e=>setProductInfo(e.target.value)} placeholder="Tên sản phẩm, đặc điểm, công dụng, giá hoặc ưu đãi nếu có..."/>
+        <label>Skill</label><select value={skillId} onChange={e=>setSkillId(e.target.value)}>{skills.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select>
+        <label>Nhà cung cấp</label><select value={provider} onChange={e=>setProvider(e.target.value)}><option value="auto">Auto</option>{providers.map(item=><option key={item.id} value={item.id} disabled={!item.configured}>{item.name}{item.configured?` · ${item.model}`:' · chưa cấu hình'}</option>)}</select>
+        <div className="ai-sidebar-numbers"><div><label>Số lượng</label><input type="number" min="1" max="100" value={count} onChange={e=>setCount(Math.max(1,Math.min(100,Math.trunc(+e.target.value||1))))}/></div><div><label>Thời lượng</label><div className="duration-pair"><input aria-label="Từ giây" type="number" min="5" max="120" value={durationMin} onChange={e=>setDurationMin(+e.target.value)}/><span>–</span><input aria-label="Đến giây" type="number" min="5" max="120" value={durationMax} onChange={e=>setDurationMax(+e.target.value)}/></div></div></div>
+        <button className="primary wide" disabled={generating||!productInfo.trim()||!skillId||!configured.length} onClick={generate}><Wand2 size={16}/>{generating?'Đang tạo...':`Tạo ${count} kịch bản`}</button>
+        {!configured.length&&<small className="ai-provider-note">Chưa cấu hình API AI trong .env</small>}
+        <div className="ai-voice-section">
+          <div className="ai-voice-section-title"><AudioLines size={14}/><span>Tạo giọng</span></div>
+          <label>Giọng đọc</label>
+          <select aria-label="Giọng đọc" value={voice} onChange={e=>setVoice(e.target.value)}>{voices.map(item=><option key={item.id} value={item.id}>{item.label}</option>)}</select>
+          <div className="ai-voice-row">
+            <div>
+              <label>Thiết bị</label>
+              <select aria-label="Thiết bị" value={device} onChange={e=>setDevice(e.target.value)}><option value="cuda">CUDA</option><option value="auto">Auto</option><option value="cpu">CPU</option></select>
+            </div>
+            <div>
+              <label>Tốc độ: <b style={{color:'#45d8b7'}}>{speed.toFixed(1)}×</b></label>
+              <input type="range" min=".5" max="2" step=".1" value={speed} onChange={e=>setSpeed(+e.target.value)} style={{padding:0,border:0,boxShadow:'none'}}/>
+            </div>
+          </div>
+          <label>Tên file</label>
+          <input aria-label="Tên file" value={audioName} onChange={e=>setAudioName(e.target.value)} placeholder="kich-ban-ai"/>
+          <label>Tên nhóm audio</label>
+          <input aria-label="Tên nhóm" value={groupName} onChange={e=>setGroupName(e.target.value)} placeholder="Tên nhóm audio"/>
+          <button className="primary wide" style={{marginTop:10}} disabled={creatingVoice||!selected.length||!voice||!groupName.trim()} onClick={()=>createVoices()}><AudioLines size={15}/>{creatingVoice?queueProgress:`Tạo nhóm (${selected.length})`}</button>
+        </div>
+      </aside>
+
+      <div className="ai-script-workspace">
+        <div className="script-table-toolbar">
+          <div className="toolbar-left">
+            <strong className="toolbar-title">{scripts.length} kịch bản</strong>
+            <span className="toolbar-badge selected">{selected.length} đã chọn</span>
+            {providerUsed && <span className="toolbar-badge provider">{providerUsed} · {modelUsed}</span>}
+          </div>
+          <div className="toolbar-right">
+            <button
+              type="button"
+              className={`sel-all-btn${allSelected ? ' sel-all-active' : ''}`}
+              title={allSelected ? 'Bỏ chọn tất cả' : 'Chọn tất cả'}
+              onClick={() => setSelected(allSelected ? [] : scripts.map(s => s.index))}
+            >
+              <CheckCircle2 size={15} />
+              <span>{allSelected ? 'Bỏ chọn' : 'Chọn tất cả'}</span>
+            </button>
+            <button type="button" className="icon-button" title="Thêm kịch bản" onClick={addScript}>
+              <Plus size={16} />
+            </button>
+            <button type="button" className="icon-button danger-quiet" title="Xóa toàn bộ" disabled={!scripts.length} onClick={clearScripts}>
+              <Trash2 size={16} />
+            </button>
+          </div>
+        </div>
+
+        {!scripts.length ? (
+          <Empty title="Chưa có kịch bản" text="Tạo bằng AI hoặc thêm một dòng để nhập thủ công." />
+        ) : (
+          <div className="script-table-container">
+            <table className="script-table">
+              <thead>
+                <tr>
+                  <th className="th-index">#</th>
+                  <th className="th-content">Nội dung kịch bản ({scripts.length})</th>
+                  <th className="th-actions">Thao tác</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scripts.map(item => {
+                  const words = item.text.trim() ? item.text.trim().split(/\s+/).filter(Boolean).length : 0
+                  const isSel = selected.includes(item.index)
+                  return (
+                    <tr key={item.index} className={`script-row${isSel ? ' script-row-selected' : ''}`}>
+                      <td className="script-col-index">
+                        <span className="script-index-badge">{item.index}</span>
+                      </td>
+                      <td className="script-col-content">
+                        <textarea
+                          rows={3}
+                          value={item.text}
+                          onChange={e => patchText(item.index, e.target.value)}
+                          placeholder="Nhập nội dung kịch bản..."
+                          className="script-table-textarea"
+                        />
+                        <div className="script-meta-bar">
+                          <span className="script-word-count">{words} từ</span>
+                          <span className="script-duration">≈ {item.estimated_duration_seconds || Math.round(words / 4)}s</span>
+                          {item.warnings && item.warnings.length > 0 && (
+                            <span className="script-warning-badge" title={item.warnings.join('\n')}>
+                              ⚠️ {item.warnings[0]}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="script-col-actions">
+                        <div className="script-action-group">
+                          <button
+                            type="button"
+                            className="row-icon voice"
+                            title="Tạo giọng cho dòng này"
+                            disabled={creatingVoice || !voice || !item.text.trim()}
+                            onClick={() => createVoices([item.index])}
+                          >
+                            <AudioLines size={15} />
+                          </button>
+                          <button
+                            type="button"
+                            className="row-icon delete"
+                            title="Xóa dòng"
+                            onClick={() => removeScript(item.index)}
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                          <button
+                            type="button"
+                            className={`sel-row-btn${isSel ? ' sel-row-active' : ''}`}
+                            title={isSel ? 'Bỏ chọn' : 'Chọn dòng này'}
+                            onClick={() => setSelected(old => isSel ? old.filter(v => v !== item.index) : Array.from(new Set([...old, item.index])))}
+                          >
+                            <MousePointer2 size={15} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  </section>
 }
 
 async function uploadAssets(projectId: string, files: FileList | File[] | null, batchName?: string): Promise<Asset[]> {
@@ -181,7 +437,7 @@ function MediaPanel({ projectId, assets, refresh, guarded }: { projectId: string
   async function upload(files: FileList | null) { await guarded(async () => { setBusy(true); await uploadAssets(projectId, files); await refresh(); setBusy(false) }); setBusy(false) }
   async function remove(id: string) { if (!confirm('Xóa asset và file này?')) return; await guarded(async () => { await request(`/assets/${id}`, { method: 'DELETE' }); await refresh() }) }
   return <section>
-    <div className="section-title"><div><h2>Thư viện media</h2><p>Video, audio và output của project.</p></div><div className="header-actions"><button className="secondary" onClick={() => guarded(async () => { await request(`/projects/${projectId}/open-folder`, { method:'POST' }) })}><FolderOpen size={16} /> Mở thư mục</button><label className="button"><Upload size={16} />{busy ? 'Đang nhập...' : 'Nhập file'}<input hidden multiple type="file" accept="video/*,audio/*" disabled={busy} onChange={e => upload(e.target.files)} /></label></div></div>
+    <div className="section-title compact-section-title"><div className="header-actions"><button className="secondary" onClick={() => guarded(async () => { await request(`/projects/${projectId}/open-folder`, { method:'POST' }) })}><FolderOpen size={16} /> Mở thư mục</button><label className="button"><Upload size={16} />{busy ? 'Đang nhập...' : 'Nhập file'}<input hidden multiple type="file" accept="video/*,audio/*" disabled={busy} onChange={e => upload(e.target.files)} /></label></div></div>
     <div className="segmented">{[['all','Tất cả'],['video','Video'],['tts_audio','TTS'],['external_audio','Audio'],['output','Output']].map(([id,label]) => <button key={id} className={filter === id ? 'active':''} onClick={() => setFilter(id)}>{label}</button>)}</div>
     {!shown.length ? <Empty title="Chưa có media" text="Nhập video hoặc tạo giọng đọc để bắt đầu." /> : <div className="asset-grid">{shown.map(asset => <article className="asset-card" key={asset.id}>
       <div className="asset-preview">{asset.type === 'video' || asset.type === 'output' ? <video src={streamUrl(asset.id)} controls preload="metadata" poster={asset.thumbnail_path ? thumbnailUrl(asset.id) : undefined} /> : <AudioLines size={34} />}</div>
@@ -268,7 +524,7 @@ function VoicePanel({ projectId, audios, jobs, guarded }: { projectId: string; a
       setSelectedAudioIds([])
     })
   }
-  return <section><div className="section-title"><div><h2>Voice Studio</h2><p>Danh sách giọng được tải tự động. File mới mặc định là MP3.</p></div></div>
+  return <section>
     {activeJob && <div className="tts-progress"><div><span>Đang tạo: {String(activeJob.input_json.name || 'voice')} · tiến độ ước tính</span><b>{Math.round(activeJob.progress)}%</b></div><div className="progress"><i style={{width:`${activeJob.progress}%`}} /></div></div>}
     <div className="two-columns"><div className="panel"><label>Văn bản</label><textarea rows={10} value={text} onChange={e => setText(e.target.value)} placeholder="Nhập nội dung cần đọc..." /><div className="counter">{text.length.toLocaleString()} ký tự</div>
       <div className="form-row"><div><label>Tên file gốc</label><input value={name} onChange={e => setName(e.target.value)} /><small className="field-hint">Tự động thêm _1, _2, _3...</small></div><div><label>Thiết bị</label><select value={device} onChange={e => setDevice(e.target.value)}><option value="cuda">CUDA</option><option value="auto">Auto</option><option value="cpu">CPU</option></select></div><div><label>Định dạng</label><select value={format} onChange={e => setFormat(e.target.value)}><option value="mp3">MP3</option><option value="wav">WAV</option></select></div></div>
@@ -867,6 +1123,16 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
   const [audioTab, setAudioTab] = useState<'voice' | 'bgm'>('voice')
   const [voiceGroupFilter, setVoiceGroupFilter] = useState('all')
   const [uploadingBgm, setUploadingBgm] = useState(false)
+  const [globalBgmTracks, setGlobalBgmTracks] = useState<BgmTrack[]>([])
+
+  // Fetch global BGM library
+  useEffect(() => {
+    request<BgmTrack[]>('/bgm').then(setGlobalBgmTracks).catch(() => {})
+  }, [])
+
+  async function refreshBgmLibrary() {
+    try { setGlobalBgmTracks(await request<BgmTrack[]>('/bgm')) } catch {}
+  }
   const [previewSeq, setPreviewSeq] = useState<VideoSequence | null>(null)
   const [batchFilter, setBatchFilter] = useState<string[] | 'all'>('all')
   const [selectedIds, setSelectedIds] = useState<string[]>([])
@@ -902,7 +1168,7 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
         const cleaned = {
           ...value,
           audioId: value.audioId && audioIds.has(value.audioId) ? value.audioId : '',
-          bgmId: value.bgmId && audioIds.has(value.bgmId) ? value.bgmId : '',
+          bgmId: value.bgmId || '',
         }
         if (cleaned.audioId !== value.audioId || cleaned.bgmId !== value.bgmId) changed = true
         next[sequenceId] = cleaned
@@ -938,7 +1204,8 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
 
   // Phân loại audio
   const voiceAudios = audios.filter((a: Asset) => a.type === 'tts_audio' || (!a.display_name.toLowerCase().includes('bgm') && a.type !== 'external_audio'))
-  const bgmAudios = audios.filter((a: Asset) => a.type === 'external_audio' || a.display_name.toLowerCase().includes('bgm') || a.display_name.toLowerCase().includes('nhac'))
+  // bgmAudios replaced by globalBgmTracks (global BGM library)
+  const bgmAudios = globalBgmTracks
   const voiceGroups = Array.from(new Set(voiceAudios.map((a: Asset) => String(a.metadata_json.group_name || '')).filter(Boolean))) as string[]
   const filteredVoiceAudios = voiceGroupFilter === 'all' ? voiceAudios : voiceAudios.filter((a: Asset) => String(a.metadata_json.group_name || '') === voiceGroupFilter)
   const usedVoiceAudioIds = new Set((sequences as VideoSequence[]).map(seq => assignments[seq.id]?.audioId).filter(Boolean))
@@ -973,10 +1240,18 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
     if (!files?.length) return
     await guarded(async () => {
       setUploadingBgm(true)
-      await uploadAssets(projectId, files)
-      if (refresh) await refresh()
+      const form = new FormData()
+      Array.from(files).forEach(f => form.append('files', f))
+      await request<BgmTrack[]>('/bgm/upload', { method: 'POST', body: form })
+      await refreshBgmLibrary()
       setUploadingBgm(false)
     })
+  }
+
+  async function deleteBgmTrack(trackId: string) {
+    if (!confirm('Xóa nhạc nền này khỏi kho?')) return
+    await request('/bgm/' + trackId, { method: 'DELETE' })
+    await refreshBgmLibrary()
   }
 
   function applyBgmToAll(bgmId: string) {
@@ -1068,7 +1343,7 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
               <AudioLines size={14} /> Giọng đọc ({voiceAudios.length})
             </button>
             <button className={audioTab === 'bgm' ? 'active' : ''} onClick={() => setAudioTab('bgm')}>
-              <Music size={14} /> Nhạc nền ({bgmAudios.length})
+              <Music size={14} /> Kho nhạc nền ({globalBgmTracks.length})
             </button>
           </div>
           {audioTab === 'bgm' && (
@@ -1126,35 +1401,46 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
           </div>
         ) : (
           <div className="audio-tray-scroll">
-            {bgmAudios.length === 0 ? (
-              <p className="muted" style={{padding:'12px'}}>Chưa có file nhạc nền. Bấm nút "Thêm nhạc nền" ở góc trên để tải file MP3/WAV.</p>
+            {globalBgmTracks.length === 0 ? (
+              <p className="muted" style={{padding:'12px'}}>Kho nhạc nền trống. Bấm "Thêm nhạc nền" để upload file MP3/WAV vào kho dùng chung.</p>
             ) : (
-              bgmAudios.map((a: Asset) => (
+              globalBgmTracks.map((t: BgmTrack) => (
                 <article
                   draggable
                   onDragStart={e => {
                     e.dataTransfer.setData('type', 'bgm')
-                    e.dataTransfer.setData('bgmId', a.id)
+                    e.dataTransfer.setData('bgmId', t.id)
                   }}
-                  key={a.id}
+                  key={t.id}
                   className="audio-card bgm-card"
                   title="Kéo thả vào ô Nhạc nền của sequence"
                 >
                   <div className="audio-card-top">
                     <Music size={15} color="#29d5b0" />
                     <div>
-                      <b>{a.display_name}</b>
-                      <span>{formatDuration(a.duration_ms)} · {formatDateTime(a.created_at)}</span>
+                      <b>{t.display_name}</b>
+                      <span>{formatDuration(t.duration_ms)}{t.tags ? ` · ${t.tags}` : ''} · {formatDateTime(t.created_at)}</span>
                     </div>
                   </div>
-                  <audio controls preload="none" src={streamUrl(a.id)} />
-                  <button
-                    className="apply-all-btn"
-                    title="Gán nhạc này cho tất cả video"
-                    onClick={() => applyBgmToAll(a.id)}
-                  >
-                    Áp dụng cho tất cả video
-                  </button>
+                  <audio controls preload="none" src={bgmStreamUrl(t.id)} />
+                  <div className="bgm-card-footer">
+                    <button
+                      type="button"
+                      className="bgm-apply-btn"
+                      title="Gán nhạc này cho tất cả video đã chọn"
+                      onClick={() => applyBgmToAll(t.id)}
+                    >
+                      Áp dụng cho video đã chọn
+                    </button>
+                    <button
+                      type="button"
+                      className="bgm-delete-btn"
+                      title="Xóa khỏi kho"
+                      onClick={() => deleteBgmTrack(t.id)}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
                 </article>
               ))
             )}

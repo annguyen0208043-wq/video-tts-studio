@@ -13,3 +13,12 @@ export type Job = {
   input_json: Record<string, unknown>; output_asset_id?: string | null; error_message?: string | null
   log_path?: string | null; created_at: string; updated_at: string
 }
+export type AISkill = { id: string; name: string; constraints: Record<string, unknown> }
+export type AIProvider = { id: string; name: string; configured: boolean; model?: string | null }
+export type GeneratedScript = { index: number; text: string; estimated_duration_seconds: number; warnings: string[] }
+export type ScriptGenerateResult = { provider_used: string; model_used: string; scripts: GeneratedScript[] }
+export type BgmTrack = {
+  id: string; display_name: string; relative_path: string
+  duration_ms?: number | null; codec?: string | null
+  tags?: string | null; file_size?: number | null; created_at: string
+}

@@ -1,0 +1,120 @@
+.voice-picker .voice-library-trigger {
+  display: flex; align-items: center; justify-content: flex-start; gap: 12px;
+  width: 100%; padding: 13px 15px; text-align: left; color: #eaf0fa;
+  background: #101927; border: 1px solid #35435c; border-radius: 12px;
+}
+.voice-library-trigger:hover { border-color: #9284ff; background: #172133; }
+.voice-library-avatar { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 43px; height: 43px; border-radius: 12px; background: #302c54; color: #b9aaff; }
+.voice-library-trigger #tts-voice-value { flex: 1; min-width: 0; }
+.voice-library-trigger strong { display: block; font-size: 14px; font-weight: 600; }
+.voice-library-trigger small { display: block; margin-top: 5px; color: #a5b2c6; font-size: 12px; font-weight: 400; }
+.voice-library-change { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #c3baff; }
+.voice-library-shortcuts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+.voice-library-shortcuts button { padding: 7px 10px; background: transparent; color: #b7c4d8; border: 1px solid #29384e; font-size: 12px; font-weight: 500; }
+.voice-library-shortcuts button:hover { color: #dfd9ff; border-color: #8f80fa; }
+.voice-library-shortcuts button span { padding: 1px 6px; border-radius: 5px; background: #26334a; font-size: 11px; }
+.voice-library-dialog {
+  width: min(1060px, calc(100vw - 48px)); max-width: none; max-height: min(840px, calc(100dvh - 56px));
+  padding: 0; border: 1px solid #39465f; border-radius: 20px; color: #eaf0fa;
+  background: #111a28; box-shadow: 0 28px 100px #0009; font: 14px Inter, system-ui, sans-serif;
+  overflow: hidden;
+}
+.voice-library-dialog::backdrop { background: #040811b8; backdrop-filter: blur(4px); }
+.voice-library-shell { display: flex; flex-direction: column; max-height: min(838px, calc(100dvh - 58px)); }
+.voice-library-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 25px 28px 20px; }
+.voice-library-eyebrow { color: #9b8dff; letter-spacing: 1.8px; font-size: 10px; font-weight: 700; }
+.voice-library-header h2 { font: 700 23px Inter, system-ui, sans-serif; margin: 7px 0 8px; }
+.voice-library-header p { font-size: 13px; color: #a8b6cb; }
+.voice-library-dialog button { font-size: 13px; font-weight: 600; }
+.voice-library-dialog button:focus-visible, .voice-library-trigger:focus-visible { outline: 2px solid #b9aaff; outline-offset: 3px; }
+.voice-library-dialog .vl-icon { width: 34px; height: 34px; padding: 0; background: transparent; color: #aab7cb; flex-shrink: 0; border: 1px solid transparent; }
+.voice-library-dialog .vl-icon:hover { color: #fff; background: #253249; border-color: #3a4a65; }
+.voice-library-tabs { display: flex; gap: 7px; padding: 0 28px; border-bottom: 1px solid #2c394f; flex-shrink: 0; }
+.voice-library-tabs button { padding: 12px 17px; border-radius: 8px 8px 0 0; background: transparent; color: #9daec5; border-bottom: 3px solid transparent; }
+.voice-library-tabs button[aria-selected=true] { color: #d8ceff; border-bottom-color: #9a85ff; background: #24233d; }
+.voice-library-tabs button:hover { background: #1c2940; color: #eaf0fa; }
+.voice-library-tabs button span { font-size: 11px; padding: 2px 6px; border-radius: 5px; background: #2c3750; }
+.voice-library-content { padding: 22px 28px; overflow-y: auto; min-height: 260px; scrollbar-width: thin; scrollbar-color: #4a5974 transparent; }
+.voice-library-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+.vl-search { display: flex; align-items: center; gap: 10px; flex: 1; padding: 0 12px; border: 1px solid #34445e; border-radius: 9px; color: #90a4c4; background: #0d1522; }
+.voice-library-dialog .vl-search input { min-width: 0; border: 0; background: transparent; box-shadow: none; padding: 12px 0; font-size: 13px; }
+.vl-search:focus-within { border-color: #9a85ff; }
+.voice-library-dialog .voice-library-toolbar select { width: 158px; padding: 11px 10px; font-size: 12px; flex-shrink: 0; background: #142033; }
+.vl-list-heading { display: flex; justify-content: space-between; align-items: center; gap: 15px; margin-bottom: 12px; }
+.vl-list-heading h3 { margin: 0 0 5px; font-size: 16px; }
+.vl-list-heading p { color: #95a7c0; font-size: 12px; }
+.vl-list-heading>span { white-space: nowrap; color: #9baec8; font-size: 12px; }
+.voice-library-list { display: flex; flex-direction: column; gap: 6px; }
+.vl-row { display: flex; align-items: center; gap: 15px; padding: 13px 14px; min-height: 77px; border-radius: 11px; border: 1px solid transparent; background: #151f30; }
+.vl-row:hover { background: #1b2a3e; border-color: #35455f; }
+.vl-row.selected { background: #25233e; border-color: #71619e; }
+.vl-row.playing { border-color: #3d9b87; }
+.voice-library-dialog .vl-audition { padding: 0; height: 43px; width: 43px; flex-shrink: 0; border-radius: 50%; background: #243650; color: #d2ddf1; border: 1px solid #3d526f; }
+.voice-library-dialog .vl-audition:hover { background: #4b3f86; border-color: #ad94ff; color: #fff; }
+.vl-row.playing .vl-audition { background: #173f37; color: #8ee6cc; border-color: #51a891; }
+.vl-row-info { min-width: 0; flex: 1; text-align: left; }
+.vl-row-info>strong { display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 8px; font-size: 14px; font-weight: 600; color: #eaf0fa; }
+.vl-row-info>small { display: block; margin-top: 6px; line-height: 1.5; font-size: 12px; color: #9fb0c9; }
+.vl-recommended { color: #e2c18a; border: 1px solid #665435; background: #322c22; border-radius: 5px; padding: 2px 5px; font-size: 9px; font-weight: 500; }
+.vl-language { width: 112px; color: #bfcde0; font-size: 12px; text-align: left; flex-shrink: 0; }
+.vl-language small { display: block; color: #8197b5; font-size: 11px; margin-top: 5px; }
+.voice-library-dialog .vl-use { min-width: 105px; padding: 9px 12px; background: #1c2940; color: #d4caff; border: 1px solid #65558c; border-radius: 8px; white-space: nowrap; }
+.voice-library-dialog .vl-use:hover { background: #4d3c83; color: #fff; }
+.voice-library-dialog .vl-use.chosen { background: #383057; color: #ded5ff; border-color: #8b76bb; }
+.vl-rename { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.vl-rename input { flex: 1; min-width: 140px; font-size: 13px; padding: 9px; }
+.vl-rename button { padding: 8px 10px; white-space: nowrap; }
+.voice-library-dialog .vl-quiet { color: #afbdd1; background: #233149; }
+.vl-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 265px; padding: 30px; text-align: center; color: #8e80cb; }
+.vl-empty h3 { font-size: 18px; color: #e4eaf5; margin: 17px 0 8px; }
+.vl-empty p { color: #99abc4; max-width: 390px; font-size: 13px; margin-bottom: 18px; }
+.voice-library-dialog .vl-primary { padding: 12px 17px; background: #7961e8; color: #fff; border: 1px solid #9d88f8; border-radius: 9px; }
+.voice-library-dialog .vl-primary:hover { background: #8970fa; }
+.vl-clone-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 30px; padding: 4px 0 8px; }
+.vl-clone-main h3 { margin-bottom: 8px; font-size: 18px; }
+.vl-clone-main>p { color: #9eafc7; font-size: 13px; line-height: 1.7; }
+.vl-clone-main>label:not(.vl-upload) { display: block; margin: 24px 0 9px; color: #d4deee; font-size: 13px; font-weight: 600; }
+.vl-clone-main>input { font-size: 13px; padding: 12px; }
+.vl-clone-main>small { display: block; color: #92a4be; font-size: 11px; line-height: 1.6; margin-top: 9px; }
+.voice-library-dialog .vl-upload { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 24px 14px; background: #18223a; border: 1px dashed #7067a7; border-radius: 12px; cursor: pointer; color: #b7a9ef; }
+.vl-upload strong { color: #d5daeb; font-size: 13px; word-break: break-word; text-align: center; }
+.vl-upload span { color: #91a1bd; font-size: 11px; text-align: center; }
+.vl-upload:hover { border-color: #b9aaff; background: #232a48; }
+.vl-upload.busy { opacity: .5; cursor: wait; }
+.vl-clone-main audio { width: 100%; height: 38px; margin-top: 14px; }
+.voice-library-dialog .vl-save-clone { width: 100%; margin-top: 23px; }
+.vl-clone-tips { padding: 24px; border-radius: 12px; background: #0d1624; border: 1px solid #2a3951; }
+.vl-clone-tips .voice-library-avatar { margin-bottom: 19px; }
+.vl-clone-tips h3 { font-size: 14px; margin-bottom: 10px; }
+.vl-clone-tips p { color: #9eafc7; font-size: 12px; line-height: 1.85; }
+.vl-clone-tips b { font-weight: 500; color: #c8d3e5; }
+.vl-clone-tips hr { border: 0; border-top: 1px solid #29384e; margin: 22px 0; }
+.vl-tip-example { padding: 13px; background: #172237; border-radius: 8px; margin-top: 20px; }
+.vl-notice, .vl-error { display: flex; align-items: center; gap: 9px; padding: 11px 14px; margin-bottom: 15px; border-radius: 8px; font-size: 12px; line-height: 1.7; }
+.vl-notice { background: #15392f; color: #91dfbf; border: 1px solid #2f6653; }
+.vl-error { background: #3a202b; color: #ffb3bd; border: 1px solid #73404d; }
+.voice-library-footer { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 15px 28px; border-top: 1px solid #2c394f; background: #0e1725; flex-shrink: 0; }
+.voice-library-footer span { display: flex; align-items: center; gap: 7px; font-size: 11px; color: #b5c4da; }
+.voice-library-footer p { margin-top: 5px; color: #869bb9; font-size: 11px; line-height: 1.7; }
+.voice-library-dialog .vl-close { background: #25314a; border: 1px solid #3e4b65; color: #d6dfed; padding: 9px 18px; }
+@media (max-width: 760px) {
+  .voice-library-dialog { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); border-radius: 14px; }
+  .voice-library-shell { max-height: calc(100dvh - 22px); }
+  .voice-library-header { padding: 18px; }
+  .voice-library-header h2 { font-size: 20px; }
+  .voice-library-content { padding: 16px; }
+  .voice-library-tabs { padding: 0 12px; gap: 2px; }
+  .voice-library-tabs button { padding: 11px 9px; font-size: 11px; }
+  .voice-library-toolbar { flex-wrap: wrap; }
+  .vl-search { flex-basis: 100%; }
+  .voice-library-dialog .voice-library-toolbar select { flex: 1; width: auto; min-width: 0; }
+  .vl-language { display: none; }
+  .vl-row { gap: 10px; padding: 11px 9px; }
+  .vl-row-info>strong { font-size: 13px; }
+  .vl-row-info>small { font-size: 11px; }
+  .voice-library-dialog .vl-use { min-width: 80px; padding: 9px; font-size: 11px; }
+  .vl-recommended { display: none; }
+  .vl-clone-layout { grid-template-columns: 1fr; gap: 18px; }
+  .voice-library-footer { padding: 12px 16px; }
+  .voice-library-change { font-size: 0; }
+}

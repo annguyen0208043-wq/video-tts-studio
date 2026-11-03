@@ -1,0 +1,7 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+  "terminal.integrated.env.windows": {
+    "PATH": "${workspaceFolder}\\.venv\\Scripts;${workspaceFolder}\\.tools\\node;${workspaceFolder}\\.tools\\ffmpeg\\bin;${env:PATH}",
+    "HF_HOME": "${workspaceFolder}\\.tools\\huggingface"
+  }
+}

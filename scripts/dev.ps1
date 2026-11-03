@@ -1,6 +1,9 @@
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+$env:Path = "$ProjectRoot\.tools\node;$ProjectRoot\.tools\ffmpeg\bin;" + $env:Path
+$env:HF_HOME = Join-Path $ProjectRoot '.tools\huggingface'
 $Python = Join-Path $ProjectRoot "..\VieNeu-TTS\.venv\Scripts\python.exe"
+if (Test-Path "$ProjectRoot\.venv\Scripts\python.exe") { $Python = "$ProjectRoot\.venv\Scripts\python.exe" }
 $BackendDir = Join-Path $ProjectRoot "backend"
 
 if (-not (Test-Path (Join-Path $ProjectRoot ".env"))) {

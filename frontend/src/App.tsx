@@ -1,3 +1,4 @@
+import { VoicePicker } from './VoicePicker'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AudioLines, Bot, CheckCircle2, Clapperboard, Download, Eye, FolderOpen, Layers3,
@@ -475,7 +476,7 @@ function MediaPanel({ projectId, assets, refresh, guarded }: { projectId: string
 
 function VoicePanel({ projectId, audios, jobs, guarded }: { projectId: string; audios: Asset[]; jobs: Job[]; guarded: Guard }) {
   const [text, setText] = useState(() => { const key = `tts-draft:${projectId}`; const value = localStorage.getItem(key) || ''; localStorage.removeItem(key); return value }); const [device, setDevice] = useState('cuda'); const [name, setName] = useState('giong-doc')
-  const [voices, setVoices] = useState<Array<{label:string;id:string}>>([]); const [voice, setVoice] = useState(''); const [loadingVoices, setLoadingVoices] = useState(true)
+  const [voice, setVoice] = useState('')
   const [advanced, setAdvanced] = useState(false); const [useBatch, setUseBatch] = useState(true); const [batchSize, setBatchSize] = useState(16)
   const [temperature, setTemperature] = useState(.8); const [maxChars, setMaxChars] = useState(256); const [topK, setTopK] = useState(25); const [topP, setTopP] = useState(.95); const [repetition, setRepetition] = useState(1.2); const [silence, setSilence] = useState(.15)
   const [format, setFormat] = useState('mp3'); const [day, setDay] = useState('all'); const [editing, setEditing] = useState<Asset | null>(null)
@@ -490,14 +491,6 @@ function VoicePanel({ projectId, audios, jobs, guarded }: { projectId: string; a
   const days = Array.from(new Set(audios.map(a => dateKey(a.created_at)))).sort().reverse()
   const audioGroups = Array.from(new Set(audios.map(a => String(a.metadata_json.group_name || '')).filter(Boolean)))
   const filtered = audios.filter(a => (day === 'all' || dateKey(a.created_at) === day) && (audioGroup === 'all' || String(a.metadata_json.group_name || '') === audioGroup))
-
-  useEffect(() => {
-    let alive = true; setLoadingVoices(true)
-    request<Array<{label:string;id:string}>>(`/system/tts/voices?device=${device}`).then(values => {
-      if (!alive) return; setVoices(values); setVoice(old => old || values[0]?.id || ''); setLoadingVoices(false)
-    }).catch(() => { if (alive) setLoadingVoices(false) })
-    return () => { alive = false }
-  }, [device])
 
   function ttsPayload(nextText: string) {
     return {
@@ -553,7 +546,7 @@ function VoicePanel({ projectId, audios, jobs, guarded }: { projectId: string; a
     {activeJob && <div className="tts-progress"><div><span>Đang tạo: {String(activeJob.input_json.name || 'voice')} · tiến độ ước tính</span><b>{Math.round(activeJob.progress)}%</b></div><div className="progress"><i style={{width:`${activeJob.progress}%`}} /></div></div>}
     <div className="two-columns"><div className="panel"><label>Văn bản</label><textarea rows={10} value={text} onChange={e => setText(e.target.value)} placeholder="Nhập nội dung cần đọc..." /><div className="counter">{text.length.toLocaleString()} ký tự</div>
       <div className="form-row"><div><label>Tên file gốc</label><input value={name} onChange={e => setName(e.target.value)} /><small className="field-hint">Tự động thêm _1, _2, _3...</small></div><div><label>Thiết bị</label><select value={device} onChange={e => setDevice(e.target.value)}><option value="cuda">CUDA</option><option value="auto">Auto</option><option value="cpu">CPU</option></select></div><div><label>Định dạng</label><select value={format} onChange={e => setFormat(e.target.value)}><option value="mp3">MP3</option><option value="wav">WAV</option></select></div></div>
-      <label>Giọng đọc</label><select value={voice} disabled={loadingVoices} onChange={e => setVoice(e.target.value)}><option value="">{loadingVoices ? 'Đang tải giọng...' : 'Chọn giọng'}</option>{voices.map(v => <option key={v.id} value={v.id}>{v.label}</option>)}</select>
+      <VoicePicker device={device} value={voice} onChange={setVoice} />
       <label>Tốc độ đọc: <b>{speed.toFixed(1)}×</b></label><input className="tts-speed" type="range" min=".5" max="2" step=".1" value={speed} onChange={e => setSpeed(+e.target.value)} />
       <p className="muted">Dán text: audio riêng. Nhập Excel: tạo một nhóm audio mới.</p>
       <button className="advanced-toggle" onClick={() => setAdvanced(v => !v)}>⚙ Tham số VieNeu {advanced ? '▲' : '▼'}</button>

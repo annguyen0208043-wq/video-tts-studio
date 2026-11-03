@@ -1,0 +1,9 @@
+# GTX 1070 / Pascal: use the CUDA 12.6 builds.
+# Install: .venv\Scripts\python.exe -m pip install -r backend\requirements-cuda.txt
+--extra-index-url https://download.pytorch.org/whl/cu126
+-r requirements.txt
+torch==2.8.0+cu126
+torchaudio==2.8.0+cu126
+transformers>=4.51,<5
+safetensors>=0.4
+gradio==5.49.1

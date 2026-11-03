@@ -650,6 +650,8 @@ button,.button { display:inline-flex; align-items:center; justify-content:center
 .script-table-container{max-height:calc(100vh - 120px)}
 @media(max-width:1180px){.ai-studio-grid{grid-template-columns:255px minmax(0,1fr)}.skill-actions{grid-template-columns:1fr}.skill-action{width:100%}}
 
+.voice-picker{margin:16px 0}.voice-picker>audio[hidden]{display:none}.voice-picker-error{color:#ff9ca9;font-size:12px;line-height:1.5;margin-top:8px}
+
 /* Direct batch export and download */
 .saved-batch-row{grid-template-columns:130px minmax(150px,1fr) minmax(250px,auto) auto}
 .saved-batch-actions{display:flex;align-items:center;justify-content:flex-end;gap:5px}

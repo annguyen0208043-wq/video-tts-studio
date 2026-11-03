@@ -9,3 +9,4 @@ python-dotenv>=1.0,<2
 pydantic>=2.9,<3
 pytest>=8,<9
 httpx>=0.27,<1
+vieneu==3.8.3

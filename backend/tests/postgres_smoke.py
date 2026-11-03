@@ -53,7 +53,7 @@ def main() -> None:
                     f"{BASE_URL}/projects/{project_id}/sequences/generate",
                     json={
                         "video_asset_ids": [asset["id"] for asset in assets],
-                        "mode": "product_with_repetition",
+                        "mode": "pair_both_orders",
                         "length": 2,
                         "limit": 100,
                     },

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import get_db
 from app.models import Asset, Project
-from app.schemas.api import AssetOut, OutputBatchDownload, OutputBatchRename, VideoBatchAssignment
+from app.schemas.api import AssetOut, OutputBatchDownload, OutputBatchRename, OutputRename, VideoBatchAssignment
 from app.services.media_probe import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, create_thumbnail, probe
 from app.services.storage_service import (
     create_project_dirs,
@@ -143,7 +143,19 @@ def stream_asset(asset_id: str, db: Session = Depends(get_db)):
     # parallel Range requests). The asset row is no longer needed, so return
     # the DB connection to the pool before sending file bytes.
     db.close()
-    return FileResponse(path, filename=path.name)
+    filename = asset.display_name or path.name
+    return FileResponse(path, filename=filename, content_disposition_type="inline")
+
+
+@router.get("/assets/{asset_id}/download")
+def download_asset(asset_id: str, db: Session = Depends(get_db)):
+    asset = _asset_or_404(asset_id, db)
+    path = resolve_asset_path(asset.project_id, asset.relative_path)
+    if not path.exists():
+        raise HTTPException(404, "File asset không còn tồn tại")
+    db.close()
+    filename = asset.display_name or path.name
+    return FileResponse(path, filename=filename, content_disposition_type="attachment")
 
 
 @router.get("/assets/{asset_id}/thumbnail")
@@ -215,6 +227,32 @@ def rename_output_batch(
     for asset in ordered:
         db.refresh(asset)
     return ordered
+
+
+@router.patch("/assets/{asset_id}/output-name", response_model=AssetOut)
+def rename_single_output(asset_id: str, payload: OutputRename, db: Session = Depends(get_db)):
+    asset = _asset_or_404(asset_id, db)
+    if asset.type != "output":
+        raise HTTPException(400, "Chỉ có thể đổi tên video output")
+    source = resolve_asset_path(asset.project_id, asset.relative_path)
+    if not source.exists():
+        raise HTTPException(404, f"Không tìm thấy file {asset.display_name}")
+    stem = safe_filename(Path(payload.name).stem, "video")
+    target = source.with_name(f"{stem}{source.suffix.lower()}")
+    if target.resolve() == source.resolve():
+        return asset
+    if target.exists():
+        raise HTTPException(409, f"Tên file đã tồn tại: {target.name}")
+    try:
+        source.replace(target)
+        asset.display_name = target.name
+        asset.relative_path = relative_to_project(asset.project_id, target)
+        db.commit()
+    except PermissionError as exc:
+        db.rollback()
+        raise HTTPException(409, "File đang được trình phát hoặc chương trình khác sử dụng. Hãy dừng video rồi thử lại.") from exc
+    db.refresh(asset)
+    return asset
 
 
 @router.post("/projects/{project_id}/outputs/download")

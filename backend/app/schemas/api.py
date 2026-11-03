@@ -53,6 +53,10 @@ class OutputBatchRename(BaseModel):
     base_name: str = Field(min_length=1, max_length=150)
 
 
+class OutputRename(BaseModel):
+    name: str = Field(min_length=1, max_length=150)
+
+
 class OutputBatchDownload(BaseModel):
     asset_ids: list[str] = Field(min_length=1, max_length=1000)
 
@@ -172,12 +176,23 @@ class JobOut(ORMModel):
 
 
 class ScriptGenerate(BaseModel):
-    product_info: str = Field(min_length=3, max_length=20_000)
+    product_description: str | None = Field(default=None, min_length=3, max_length=20_000)
+    product_info: str | None = Field(default=None, min_length=3, max_length=20_000)
     skill_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
     provider: str = "auto"
-    count: int = Field(default=5, ge=1, le=100)
-    duration_min: int = Field(default=18, ge=5, le=120)
-    duration_max: int = Field(default=20, ge=5, le=120)
+    count: int = Field(default=1, ge=1, le=100)
+    duration_min: int | None = Field(default=None, ge=5, le=120)
+    duration_max: int | None = Field(default=None, ge=5, le=120)
+    additional_instruction: str = Field(default="", max_length=5_000)
+
+    @property
+    def description(self) -> str:
+        return (self.product_description or self.product_info or "").strip()
+
+
+class SkillUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    content: str = Field(min_length=1, max_length=256_000)
 
 
 class GeneratedScript(BaseModel):
@@ -191,6 +206,7 @@ class ScriptGenerateOut(BaseModel):
     provider_used: str
     model_used: str
     scripts: list[GeneratedScript]
+    skill_id: str
 
 
 class BgmTrackOut(ORMModel):

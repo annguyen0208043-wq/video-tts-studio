@@ -5,7 +5,7 @@ import pytest
 from app.schemas.api import ScriptGenerate
 from app.services.ai_router import AIProviderError, AIResult, AIRouter
 from app.services.script_service import _decode, _validate, generate_scripts
-from app.services.skill_loader import load_skill
+from app.services.skill_loader import delete_skill, install_skill, load_skill, update_skill
 
 
 def payload(count: int = 5) -> ScriptGenerate:
@@ -100,3 +100,24 @@ def test_generate_five_scripts(monkeypatch):
     assert result.model_used == "configured-model"
     assert len(result.scripts) == 5
     assert all(item.text for item in result.scripts)
+
+
+def test_markdown_skill_lifecycle_uses_latest_content(monkeypatch, tmp_path):
+    monkeypatch.setattr("app.services.skill_loader.settings", type("S", (), {"skills_dir": tmp_path})())
+    created = install_skill("# Review tự nhiên\n\nViết gần gũi.".encode("utf-8"), "review.md")
+    assert created["id"].startswith("user-")
+    assert load_skill(created["id"]).instructions.endswith("Viết gần gũi.")
+
+    update_skill(created["id"], "# Review tự nhiên\n\nViết ngắn, vui.", "Review vui")
+    assert "Viết ngắn, vui." in load_skill(created["id"]).instructions
+
+    delete_skill(created["id"])
+    with pytest.raises(ValueError, match="Không tìm thấy"):
+        load_skill(created["id"])
+
+
+def test_default_request_has_no_fixed_count_or_duration():
+    request = ScriptGenerate(product_description="Túi màu kem", skill_id="tiktok-ban-hang")
+    assert request.count == 1
+    assert request.duration_min is None
+    assert request.duration_max is None

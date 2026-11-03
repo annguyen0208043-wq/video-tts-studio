@@ -41,7 +41,7 @@ def _expanded_assets(sequence: Sequence, audio: Asset | None, policy: str) -> li
     assets = [item.asset for item in sequence.items]
     if not assets:
         raise ValueError("Sequence không có video")
-    if policy != "match_audio_loop_video" or audio is None or not audio.duration_ms:
+    if policy not in {"match_audio_loop_video", "extend_video_to_audio"} or audio is None or not audio.duration_ms:
         return assets
     sequence_ms = sum(item.duration_ms or 0 for item in assets)
     if sequence_ms <= 0:
@@ -65,13 +65,15 @@ def build_ffmpeg_command(
     options: RenderOptions,
     bgm: Asset | BgmTrack | None = None,
 ) -> tuple[list[str], float]:
-    if options.duration_policy not in {"match_audio_loop_video", "match_video", "shortest"}:
+    if options.duration_policy not in {"match_audio_loop_video", "extend_video_to_audio", "match_video", "shortest"}:
         raise ValueError("Duration policy không hợp lệ")
     if options.source_audio_policy not in {"replace", "mix", "keep_original", "mute"}:
         raise ValueError("Source audio policy không hợp lệ")
     if options.video_encoder not in {"libx264", "h264_nvenc"}:
         raise ValueError("Video encoder không hợp lệ")
     width, height = _parse_resolution(options.resolution)
+    source_assets = [item.asset for item in sequence.items]
+    source_video_ms = sum(item.duration_ms or 0 for item in source_assets)
     assets = _expanded_assets(sequence, audio, options.duration_policy)
     total_video_ms = sum(item.duration_ms or 0 for item in assets)
     if total_video_ms <= 0:
@@ -80,6 +82,8 @@ def build_ffmpeg_command(
     if audio and audio.duration_ms:
         if options.duration_policy == "match_audio_loop_video":
             expected_ms = audio.duration_ms
+        elif options.duration_policy == "extend_video_to_audio":
+            expected_ms = max(source_video_ms, audio.duration_ms)
         elif options.duration_policy == "shortest":
             expected_ms = min(total_video_ms, audio.duration_ms)
 
@@ -166,8 +170,8 @@ def build_ffmpeg_command(
         filters.append(f"anullsrc=r=48000:cl=stereo,atrim=duration={duration_sec:.6f}[silencea]")
         audio_map = "[silencea]"
 
-    if audio_index is not None and options.duration_policy == "match_video":
-        filters.append(f"{audio_map}apad,atrim=duration={total_video_ms / 1000:.6f}[finala]")
+    if audio_index is not None and options.duration_policy in {"match_video", "extend_video_to_audio"}:
+        filters.append(f"{audio_map}apad,atrim=duration={expected_ms / 1000:.6f}[finala]")
         audio_map = "[finala]"
 
     command.extend(["-filter_complex", ";".join(filters), "-map", "[basev]", "-map", audio_map])

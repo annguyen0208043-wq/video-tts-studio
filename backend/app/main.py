@@ -16,6 +16,7 @@ from app.db.session import Base, SessionLocal, engine
 from app.models import Job
 from app.services.job_service import job_manager
 from app.services.storage_service import ensure_storage
+from app.services.tts_service import tts_service
 
 
 @asynccontextmanager
@@ -36,16 +37,19 @@ async def lifespan(_: FastAPI):
         db.commit()
     for job_id in queued:
         job_manager.submit(job_id)
+    if settings.tts_preload:
+        tts_service.preload_async(settings.tts_device)
     yield
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origin_regex=r"^https?://.*$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "Content-Length", "Accept-Ranges"],
 )
 app.include_router(system.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")

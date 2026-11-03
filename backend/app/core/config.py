@@ -11,6 +11,13 @@ ROOT_DIR = Path(__file__).resolve().parents[3]
 load_dotenv(ROOT_DIR / ".env")
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _resolve_path(value: str, default: str) -> Path:
     path = Path(value or default)
     if not path.is_absolute():
@@ -31,6 +38,7 @@ class Settings:
     log_dir: Path = _resolve_path(os.getenv("LOG_DIR", "./logs"), "./logs")
     vieneu_repo: Path = _resolve_path(os.getenv("VIENEU_REPO", "../VieNeu-TTS"), "../VieNeu-TTS")
     tts_device: str = os.getenv("TTS_DEVICE", "auto")
+    tts_preload: bool = _env_bool("TTS_PRELOAD", True)
     max_sequence_outputs: int = int(os.getenv("MAX_SEQUENCE_OUTPUTS", "100"))
     max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "4096"))
     max_concurrent_jobs: int = int(os.getenv("MAX_CONCURRENT_JOBS", "3"))

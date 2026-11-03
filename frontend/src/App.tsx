@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AudioLines, Bot, CheckCircle2, Clapperboard, Download, Eye, FolderOpen, Layers3,
-  LoaderCircle, MousePointer2, Music, Pause, Play, Plus, RefreshCw, Scissors, Sparkles, Trash2,
+  LoaderCircle, MousePointer2, Music, Pause, Pencil, Play, Plus, RefreshCw, Scissors, Sparkles, Trash2,
   Upload, Volume2, VolumeX, Wand2, X, XCircle,
 } from 'lucide-react'
 import { bgmStreamUrl, jsonOptions, request, streamUrl, thumbnailUrl } from './api'
@@ -10,13 +10,19 @@ import type { AIProvider, AISkill, Asset, BgmTrack, GeneratedScript, Job, Projec
 type Tab = 'media' | 'scripts' | 'voice' | 'sequence' | 'render' | 'jobs'
 type SidebarState = 'open' | 'closed'
 type Guard = (action: () => Promise<void>) => Promise<void>
-type BatchDraft = { id: string; name: string; selected: string[]; mode: string; k: number; manual: string[] }
+type BatchDraft = { id: string; name: string; selected: string[]; mode: string }
 type Assignment = {
   audioId: string
   bgmId: string
   muteOriginal: boolean
   customName: string
   voiceVolume: number
+  bgmVolume: number
+}
+type BatchExportOptions = {
+  muteOriginal: boolean
+  addBgm: boolean
+  bgmId: string
   bgmVolume: number
 }
 
@@ -171,25 +177,36 @@ export default function App() {
       {error && <ErrorBanner message={error} clear={() => setError('')} />}
       {!projectId ? <Empty title="Bắt đầu bằng một project" text="Tạo project để quản lý từng chiến dịch video." action={<button onClick={createProject}><Plus size={16} /> Tạo project</button>} /> : <>
         {tab === 'media' && <MediaPanel projectId={projectId} assets={assets} refresh={refreshProjectData} guarded={guarded} />}
-        {tab === 'scripts' && <AIScriptPanel key={projectId} projectId={projectId} guarded={guarded} refresh={refreshProjectData} />}
+        {tab === 'scripts' && <AIScriptPanel key={projectId} projectId={projectId} guarded={guarded} setTab={setTab} />}
         {tab === 'voice' && <VoicePanel projectId={projectId} audios={audios} jobs={jobs} guarded={guarded} />}
-        {tab === 'sequence' && <SequencePanel projectId={projectId} videos={videos} sequences={sequences} refresh={refreshProjectData} guarded={guarded} />}
-        {tab === 'render' && <RenderPanel key={projectId} projectId={projectId} audios={audios} sequences={sequences} outputs={outputs} system={system} guarded={guarded} setTab={setTab} refresh={refreshProjectData} />}
+        {tab === 'sequence' && <SequencePanel projectId={projectId} videos={videos} sequences={sequences} outputs={outputs} jobs={jobs} refresh={refreshProjectData} guarded={guarded} />}
+        {tab === 'render' && <RenderPanel key={projectId} projectId={projectId} audios={audios} sequences={sequences} outputs={outputs} jobs={jobs} system={system} guarded={guarded} setTab={setTab} refresh={refreshProjectData} />}
         {tab === 'jobs' && <JobsPanel jobs={jobs} outputs={outputs} refresh={refreshProjectData} guarded={guarded} />}
       </>}
     </main>
   </div>
 }
 
-function AIScriptPanel({ projectId, guarded, refresh }: { projectId: string; guarded: Guard; refresh: () => Promise<void> }) {
+function inferScriptCount(instruction: string): number | null {
+  const normalized = instruction
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D')
+    .toLowerCase()
+  const match = normalized.match(/\b(\d{1,3})\s*(?:kich\s*ban|phien\s*ban)\b/)
+  if (!match) return null
+  const value = Number(match[1])
+  return Number.isInteger(value) && value >= 1 && value <= 100 ? value : null
+}
+
+function AIScriptPanel({ projectId, guarded, setTab }: { projectId: string; guarded: Guard; setTab: (tab: Tab) => void }) {
   const [skills, setSkills] = useState<AISkill[]>([])
   const [providers, setProviders] = useState<AIProvider[]>([])
   const [productInfo, setProductInfo] = useState('')
   const [skillId, setSkillId] = useState('')
   const [provider, setProvider] = useState('auto')
-  const [count, setCount] = useState(5)
-  const [durationMin, setDurationMin] = useState(18)
-  const [durationMax, setDurationMax] = useState(20)
+  const [additionalInstruction, setAdditionalInstruction] = useState('')
   const draftKey = `ai-script-drafts:${projectId}`
   const [scripts, setScripts] = useState<GeneratedScript[]>(() => {
     try { return JSON.parse(localStorage.getItem(draftKey) || '[]') } catch { return [] }
@@ -198,14 +215,8 @@ function AIScriptPanel({ projectId, guarded, refresh }: { projectId: string; gua
   const [providerUsed, setProviderUsed] = useState('')
   const [modelUsed, setModelUsed] = useState('')
   const [generating, setGenerating] = useState(false)
-  const [creatingVoice, setCreatingVoice] = useState(false)
-  const [voices, setVoices] = useState<Array<{label:string;id:string}>>([])
-  const [voice, setVoice] = useState('')
-  const [device, setDevice] = useState('cuda')
-  const [audioName, setAudioName] = useState('kich-ban-ai')
-  const [groupName, setGroupName] = useState('AI kịch bản')
-  const [speed, setSpeed] = useState(1)
-  const [queueProgress, setQueueProgress] = useState('')
+  const [uploadingSkill, setUploadingSkill] = useState(false)
+  const skillFileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => { localStorage.setItem(draftKey, JSON.stringify(scripts)) }, [draftKey, scripts])
 
@@ -213,11 +224,9 @@ function AIScriptPanel({ projectId, guarded, refresh }: { projectId: string; gua
     Promise.all([
       request<AISkill[]>('/ai/skills'),
       request<{providers: AIProvider[]}>('/ai/providers'),
-      request<Array<{label:string;id:string}>>('/system/tts/voices'),
-    ]).then(([skillRows, providerRows, voiceRows]) => {
-      setSkills(skillRows); setProviders(providerRows.providers); setVoices(voiceRows)
+    ]).then(([skillRows, providerRows]) => {
+      setSkills(skillRows); setProviders(providerRows.providers)
       if (skillRows[0]) setSkillId(current => current || skillRows[0].id)
-      if (voiceRows[0]) setVoice(current => current || voiceRows[0].id)
     }).catch(() => {})
   }, [])
 
@@ -226,13 +235,56 @@ function AIScriptPanel({ projectId, guarded, refresh }: { projectId: string; gua
     await guarded(async () => {
       setGenerating(true)
       try {
+        const count = inferScriptCount(additionalInstruction) ?? 1
         const result = await request<ScriptGenerateResult>(`/projects/${projectId}/scripts/generate`, jsonOptions('POST', {
-          product_info: productInfo, skill_id: skillId, provider, count,
-          duration_min: durationMin, duration_max: durationMax,
+          product_description: productInfo, skill_id: skillId, provider, count,
+          additional_instruction: additionalInstruction,
         }))
         setScripts(result.scripts); setSelected(result.scripts.map(item => item.index))
         setProviderUsed(result.provider_used); setModelUsed(result.model_used)
       } finally { setGenerating(false) }
+    })
+  }
+
+  async function manageSkill() {
+    if (!skillId) return
+    await guarded(async () => {
+      const detail = await request<AISkill>(`/ai/skills/${skillId}`)
+      if (detail.read_only) { alert(detail.content || ''); return }
+      const name = prompt('Tên Skill:', detail.name)
+      if (name === null) return
+      const content = prompt('Nội dung Markdown của Skill:', detail.content || '')
+      if (content === null) return
+      const updated = await request<AISkill>(`/ai/skills/${skillId}`, jsonOptions('PUT', { name, content }))
+      setSkills(old => old.map(item => item.id === updated.id ? updated : item))
+    })
+  }
+
+  async function deleteSelectedSkill() {
+    const current = skills.find(item => item.id === skillId)
+    if (!current || current.read_only || !confirm(`Xóa Skill “${current.name}”?`)) return
+    await guarded(async () => {
+      await request(`/ai/skills/${skillId}`, { method: 'DELETE' })
+      const rows = await request<AISkill[]>('/ai/skills')
+      setSkills(rows); setSkillId(rows[0]?.id || '')
+    })
+  }
+
+  async function uploadSkill(file?: File) {
+    if (!file) return
+    await guarded(async () => {
+      setUploadingSkill(true)
+      try {
+        const body = new FormData()
+        body.append('file', file)
+        const created = await request<AISkill>('/ai/skills', { method: 'POST', body })
+        const rows = await request<AISkill[]>('/ai/skills')
+        setSkills(rows)
+        setSkillId(created.id)
+      } finally {
+        setUploadingSkill(false)
+        if (skillFileRef.current) skillFileRef.current.value = ''
+      }
     })
   }
 
@@ -258,28 +310,9 @@ function AIScriptPanel({ projectId, guarded, refresh }: { projectId: string; gua
     setScripts([]); setSelected([]); setProviderUsed(''); setModelUsed('')
   }
 
-  async function createVoices(indexes = selected) {
-    const chosen = scripts.filter(item => indexes.includes(item.index) && item.text.trim())
-    if (!chosen.length) return
-    const cleanGroup = groupName.trim()
-    if (!cleanGroup) { alert('Hãy nhập tên nhóm audio trước khi tạo giọng.'); return }
-    if (!confirm(`Tạo nhóm “${cleanGroup}” gồm ${chosen.length} audio, tốc độ ${speed.toFixed(1)}×?`)) return
-    await guarded(async () => {
-      setCreatingVoice(true)
-      try {
-        for (let position = 0; position < chosen.length; position++) {
-          const item = chosen[position]
-          setQueueProgress(`${position + 1}/${chosen.length}`)
-          await request(`/projects/${projectId}/tts/jobs`, jsonOptions('POST', {
-            text: item.text.trim(), voice, device, name: `${audioName}-${item.index}`,
-            group_name: cleanGroup, output_format: 'mp3', use_batch: true,
-            batch_size: 16, temperature: .8, max_chars: 256, top_k: 25,
-            top_p: .95, repetition_penalty: 1.2, silence_p: .15, speed,
-          }))
-        }
-        await refresh()
-      } finally { setCreatingVoice(false); setQueueProgress('') }
-    })
+  function continueToVoice(text: string) {
+    localStorage.setItem(`tts-draft:${projectId}`, text)
+    setTab('voice')
   }
 
   const configured = providers.filter(item => item.configured)
@@ -289,31 +322,23 @@ function AIScriptPanel({ projectId, guarded, refresh }: { projectId: string; gua
       <aside className="panel ai-setup-sidebar">
         <div className="ai-sidebar-title"><Wand2 size={17}/><strong>Tạo kịch bản</strong><i className={configured.length?'ready':''}/></div>
         <label>Mô tả sản phẩm</label><textarea rows={6} value={productInfo} onChange={e=>setProductInfo(e.target.value)} placeholder="Tên sản phẩm, đặc điểm, công dụng, giá hoặc ưu đãi nếu có..."/>
-        <label>Skill</label><select value={skillId} onChange={e=>setSkillId(e.target.value)}>{skills.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select>
-        <label>Nhà cung cấp</label><select value={provider} onChange={e=>setProvider(e.target.value)}><option value="auto">Auto</option>{providers.map(item=><option key={item.id} value={item.id} disabled={!item.configured}>{item.name}{item.configured?` · ${item.model}`:' · chưa cấu hình'}</option>)}</select>
-        <div className="ai-sidebar-numbers"><div><label>Số lượng</label><input type="number" min="1" max="100" value={count} onChange={e=>setCount(Math.max(1,Math.min(100,Math.trunc(+e.target.value||1))))}/></div><div><label>Thời lượng</label><div className="duration-pair"><input aria-label="Từ giây" type="number" min="5" max="120" value={durationMin} onChange={e=>setDurationMin(+e.target.value)}/><span>–</span><input aria-label="Đến giây" type="number" min="5" max="120" value={durationMax} onChange={e=>setDurationMax(+e.target.value)}/></div></div></div>
-        <button className="primary wide" disabled={generating||!productInfo.trim()||!skillId||!configured.length} onClick={generate}><Wand2 size={16}/>{generating?'Đang tạo...':`Tạo ${count} kịch bản`}</button>
-        {!configured.length&&<small className="ai-provider-note">Chưa cấu hình API AI trong .env</small>}
-        <div className="ai-voice-section">
-          <div className="ai-voice-section-title"><AudioLines size={14}/><span>Tạo giọng</span></div>
-          <label>Giọng đọc</label>
-          <select aria-label="Giọng đọc" value={voice} onChange={e=>setVoice(e.target.value)}>{voices.map(item=><option key={item.id} value={item.id}>{item.label}</option>)}</select>
-          <div className="ai-voice-row">
-            <div>
-              <label>Thiết bị</label>
-              <select aria-label="Thiết bị" value={device} onChange={e=>setDevice(e.target.value)}><option value="cuda">CUDA</option><option value="auto">Auto</option><option value="cpu">CPU</option></select>
-            </div>
-            <div>
-              <label>Tốc độ: <b style={{color:'#45d8b7'}}>{speed.toFixed(1)}×</b></label>
-              <input type="range" min=".5" max="2" step=".1" value={speed} onChange={e=>setSpeed(+e.target.value)} style={{padding:0,border:0,boxShadow:'none'}}/>
-            </div>
-          </div>
-          <label>Tên file</label>
-          <input aria-label="Tên file" value={audioName} onChange={e=>setAudioName(e.target.value)} placeholder="kich-ban-ai"/>
-          <label>Tên nhóm audio</label>
-          <input aria-label="Tên nhóm" value={groupName} onChange={e=>setGroupName(e.target.value)} placeholder="Tên nhóm audio"/>
-          <button className="primary wide" style={{marginTop:10}} disabled={creatingVoice||!selected.length||!voice||!groupName.trim()} onClick={()=>createVoices()}><AudioLines size={15}/>{creatingVoice?queueProgress:`Tạo nhóm (${selected.length})`}</button>
+        <label>Chọn Skill</label>
+        <select value={skillId} onChange={e=>setSkillId(e.target.value)}>
+          {!skills.length && <option value="">Chưa có Skill</option>}
+          {skills.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
+        <div className="skill-actions">
+          <input ref={skillFileRef} className="visually-hidden" type="file" accept=".md,.markdown,text/markdown,text/plain" onChange={e=>uploadSkill(e.target.files?.[0])}/>
+          <button type="button" className="secondary skill-action" disabled={uploadingSkill} onClick={()=>skillFileRef.current?.click()}><Upload size={14}/>{uploadingSkill?'Đang tải...':'Tải Skill lên'}</button>
+          <a className="button secondary skill-action" href="/api/ai/skills/template" download="SKILL_MAU_KICH_BAN_LINH_HOAT.md"><Download size={14}/>Skill mẫu</a>
+          <button type="button" className="secondary skill-action" disabled={!skillId} onClick={manageSkill}><Eye size={14}/>Xem / sửa</button>
+          <button type="button" className="danger-button skill-action" disabled={!skillId||!!skills.find(s=>s.id===skillId)?.read_only} onClick={deleteSelectedSkill}><Trash2 size={14}/>Xóa Skill</button>
         </div>
+        <small className="skill-help">Đang gửi kèm: <b>{skills.find(s=>s.id===skillId)?.name || 'chưa chọn'}</b>. Upload Markdown UTF-8.</small>
+        <label>Nhà cung cấp</label><select value={provider} onChange={e=>setProvider(e.target.value)}><option value="auto">Auto</option>{providers.map(item=><option key={item.id} value={item.id} disabled={!item.configured}>{item.name}{item.configured?` · ${item.model}`:' · chưa cấu hình'}</option>)}</select>
+        <label>Yêu cầu bổ sung (không bắt buộc)</label><textarea rows={3} value={additionalInstruction} onChange={e=>setAdditionalInstruction(e.target.value)} placeholder="Ví dụ: viết 3 phiên bản, khoảng 25 giây..."/>
+        <button className="primary wide" disabled={generating||!productInfo.trim()||!skillId||!configured.length} onClick={generate}><Wand2 size={16}/>{generating?'Đang tạo...':'Viết kịch bản bằng AI'}</button>
+        {!configured.length&&<small className="ai-provider-note">Chưa cấu hình API AI trong .env</small>}
       </aside>
 
       <div className="ai-script-workspace">
@@ -386,9 +411,9 @@ function AIScriptPanel({ projectId, guarded, refresh }: { projectId: string; gua
                           <button
                             type="button"
                             className="row-icon voice"
-                            title="Tạo giọng cho dòng này"
-                            disabled={creatingVoice || !voice || !item.text.trim()}
-                            onClick={() => createVoices([item.index])}
+                            title="Đưa sang trình Tạo giọng"
+                            disabled={!item.text.trim()}
+                            onClick={() => continueToVoice(item.text)}
                           >
                             <AudioLines size={15} />
                           </button>
@@ -440,7 +465,7 @@ function MediaPanel({ projectId, assets, refresh, guarded }: { projectId: string
     <div className="section-title compact-section-title"><div className="header-actions"><button className="secondary" onClick={() => guarded(async () => { await request(`/projects/${projectId}/open-folder`, { method:'POST' }) })}><FolderOpen size={16} /> Mở thư mục</button><label className="button"><Upload size={16} />{busy ? 'Đang nhập...' : 'Nhập file'}<input hidden multiple type="file" accept="video/*,audio/*" disabled={busy} onChange={e => upload(e.target.files)} /></label></div></div>
     <div className="segmented">{[['all','Tất cả'],['video','Video'],['tts_audio','TTS'],['external_audio','Audio'],['output','Output']].map(([id,label]) => <button key={id} className={filter === id ? 'active':''} onClick={() => setFilter(id)}>{label}</button>)}</div>
     {!shown.length ? <Empty title="Chưa có media" text="Nhập video hoặc tạo giọng đọc để bắt đầu." /> : <div className="asset-grid">{shown.map(asset => <article className="asset-card" key={asset.id}>
-      <div className="asset-preview">{asset.type === 'video' || asset.type === 'output' ? <video src={streamUrl(asset.id)} controls preload="metadata" poster={asset.thumbnail_path ? thumbnailUrl(asset.id) : undefined} /> : <AudioLines size={34} />}</div>
+      <div className="asset-preview">{asset.type === 'video' || asset.type === 'output' ? <video src={streamUrl(asset.id)} controls preload="none" poster={asset.thumbnail_path ? thumbnailUrl(asset.id) : undefined} /> : <AudioLines size={34} />}</div>
       <div className="asset-info"><strong>{asset.display_name}</strong><span>{asset.type} · {formatDuration(asset.duration_ms)} · {formatDateTime(asset.created_at)}</span></div>
       {asset.type.includes('audio') && <audio controls preload="none" src={streamUrl(asset.id)} />}
       <button className="danger-icon" onClick={() => remove(asset.id)}><Trash2 size={15} /></button>
@@ -449,7 +474,7 @@ function MediaPanel({ projectId, assets, refresh, guarded }: { projectId: string
 }
 
 function VoicePanel({ projectId, audios, jobs, guarded }: { projectId: string; audios: Asset[]; jobs: Job[]; guarded: Guard }) {
-  const [text, setText] = useState(''); const [device, setDevice] = useState('cuda'); const [name, setName] = useState('giong-doc')
+  const [text, setText] = useState(() => { const key = `tts-draft:${projectId}`; const value = localStorage.getItem(key) || ''; localStorage.removeItem(key); return value }); const [device, setDevice] = useState('cuda'); const [name, setName] = useState('giong-doc')
   const [voices, setVoices] = useState<Array<{label:string;id:string}>>([]); const [voice, setVoice] = useState(''); const [loadingVoices, setLoadingVoices] = useState(true)
   const [advanced, setAdvanced] = useState(false); const [useBatch, setUseBatch] = useState(true); const [batchSize, setBatchSize] = useState(16)
   const [temperature, setTemperature] = useState(.8); const [maxChars, setMaxChars] = useState(256); const [topK, setTopK] = useState(25); const [topP, setTopP] = useState(.95); const [repetition, setRepetition] = useState(1.2); const [silence, setSilence] = useState(.15)
@@ -543,7 +568,7 @@ function VoicePanel({ projectId, audios, jobs, guarded }: { projectId: string; a
           <button className="tts-queue-cancel" onClick={() => cancelTts(job.id)} title="Hủy tác vụ"><X size={14} /></button>
         </div>)}
       </div>
-    </div><div className="panel"><div className="panel-heading"><h3>Thư viện audio</h3><div className="audio-filters"><select value={audioGroup} onChange={e => setAudioGroup(e.target.value)}><option value="all">Tất cả nhóm</option>{audioGroups.map(group => <option value={group} key={group}>{group}</option>)}</select><select value={day} onChange={e => setDay(e.target.value)}><option value="all">Tất cả ngày</option>{days.map(d => <option value={d} key={d}>{new Date(`${d}T00:00:00`).toLocaleDateString('vi-VN')}</option>)}</select></div></div><div className="audio-bulk"><span>{selectedAudioIds.length} audio đã chọn</span><label>Tốc độ <b>{bulkSpeed.toFixed(1)}×</b><input type="range" min=".5" max="2" step=".1" value={bulkSpeed} onChange={e=>setBulkSpeed(+e.target.value)}/></label><button className="secondary" disabled={!selectedAudioIds.length || bulkSpeed === 1} onClick={processAudioBatch}><Scissors size={14}/> Tạo bản hàng loạt</button></div>{filtered.length ? filtered.map(asset => <div className="audio-row" key={asset.id}><div><label className="audio-select"><input type="checkbox" checked={selectedAudioIds.includes(asset.id)} onChange={e=>setSelectedAudioIds(old=>e.target.checked?[...old,asset.id]:old.filter(id=>id!==asset.id))}/><strong>{asset.display_name}</strong></label><span>{String(asset.metadata_json.group_name || 'Riêng')} · {formatDateTime(asset.created_at)} · {formatDuration(asset.duration_ms)}</span></div><audio controls src={streamUrl(asset.id)} preload="metadata" /><button className="secondary edit-audio" onClick={() => setEditing(asset)}><Scissors size={14} /> Tốc độ / cắt</button></div>) : <p className="muted">Không có audio phù hợp bộ lọc.</p>}</div></div>
+    </div><div className="panel"><div className="panel-heading"><h3>Thư viện audio</h3><div className="audio-filters"><select value={audioGroup} onChange={e => setAudioGroup(e.target.value)}><option value="all">Tất cả nhóm</option>{audioGroups.map(group => <option value={group} key={group}>{group}</option>)}</select><select value={day} onChange={e => setDay(e.target.value)}><option value="all">Tất cả ngày</option>{days.map(d => <option value={d} key={d}>{new Date(`${d}T00:00:00`).toLocaleDateString('vi-VN')}</option>)}</select></div></div><div className="audio-bulk"><span>{selectedAudioIds.length} audio đã chọn</span><label>Tốc độ <b>{bulkSpeed.toFixed(1)}×</b><input type="range" min=".5" max="2" step=".1" value={bulkSpeed} onChange={e=>setBulkSpeed(+e.target.value)}/></label><button className="secondary" disabled={!selectedAudioIds.length || bulkSpeed === 1} onClick={processAudioBatch}><Scissors size={14}/> Tạo bản hàng loạt</button></div>{filtered.length ? filtered.map(asset => <div className="audio-row" key={asset.id}><div><label className="audio-select"><input type="checkbox" checked={selectedAudioIds.includes(asset.id)} onChange={e=>setSelectedAudioIds(old=>e.target.checked?[...old,asset.id]:old.filter(id=>id!==asset.id))}/><strong>{asset.display_name}</strong></label><span>{String(asset.metadata_json.group_name || 'Riêng')} · {formatDateTime(asset.created_at)} · {formatDuration(asset.duration_ms)}</span></div><audio controls src={streamUrl(asset.id)} preload="none" /><button className="secondary edit-audio" onClick={() => setEditing(asset)}><Scissors size={14} /> Tốc độ / cắt</button></div>) : <p className="muted">Không có audio phù hợp bộ lọc.</p>}</div></div>
     {editing && <AudioEditor asset={editing} close={() => setEditing(null)} guarded={guarded} />}
     {excelFile && <div className="modal-backdrop"><div className="modal"><h2>Tạo nhóm từ Excel</h2><p>{excelFile.name} · Toàn bộ kịch bản dùng giọng và tham số đang chọn.</p><label>Tên nhóm mới</label><input maxLength={100} value={groupName} onChange={e=>setGroupName(e.target.value)}/><p>Gợi ý tháng-ngày-index; bạn có thể sửa tên.</p><div className="header-actions"><button disabled={importingExcel} className="secondary" onClick={()=>setExcelFile(null)}>Hủy</button><button disabled={importingExcel || !groupName.trim()} onClick={confirmExcel}>{importingExcel?'Đang nhập…':'Xác nhận chạy'}</button></div></div></div>}
   </section>
@@ -553,21 +578,20 @@ function AudioEditor({ asset, close, guarded }: { asset: Asset; close: () => voi
   const duration = (asset.duration_ms || 0) / 1000
   const [speed, setSpeed] = useState(1); const [start, setStart] = useState(0); const [end, setEnd] = useState(duration); const [name, setName] = useState(`${asset.display_name}-edited`)
   async function save() { await guarded(async () => { await request(`/assets/${asset.id}/audio/jobs`, jsonOptions('POST', { name, speed, trim_start:start, trim_end:end, output_format:'mp3' })); close() }) }
-  return <div className="modal-backdrop"><div className="modal"><div className="panel-heading"><h2>Chỉnh audio</h2><button className="icon-button" onClick={close}>×</button></div><audio controls src={streamUrl(asset.id)} /><label>Tên file mới</label><input value={name} onChange={e => setName(e.target.value)} /><label>Tốc độ: <b>{speed.toFixed(1)}×</b></label><input type="range" min=".5" max="2" step=".1" value={speed} onChange={e => setSpeed(+e.target.value)} /><div className="form-row"><div><label>Bắt đầu (giây)</label><input type="number" min="0" max={end} step=".1" value={start} onChange={e => setStart(+e.target.value)} /></div><div><label>Kết thúc (giây)</label><input type="number" min={start} max={duration} step=".1" value={end} onChange={e => setEnd(+e.target.value)} /></div></div><p className="muted">Kết quả dự kiến: {((end-start)/speed).toFixed(1)} giây</p><button className="primary wide" onClick={save}><Scissors size={16} /> Tạo bản MP3 mới</button></div></div>
+  return <div className="modal-backdrop"><div className="modal"><div className="panel-heading"><h2>Chỉnh audio</h2><button className="icon-button" onClick={close}>×</button></div><audio controls src={streamUrl(asset.id)} preload="none" /><label>Tên file mới</label><input value={name} onChange={e => setName(e.target.value)} /><label>Tốc độ: <b>{speed.toFixed(1)}×</b></label><input type="range" min=".5" max="2" step=".1" value={speed} onChange={e => setSpeed(+e.target.value)} /><div className="form-row"><div><label>Bắt đầu (giây)</label><input type="number" min="0" max={end} step=".1" value={start} onChange={e => setStart(+e.target.value)} /></div><div><label>Kết thúc (giây)</label><input type="number" min={start} max={duration} step=".1" value={end} onChange={e => setEnd(+e.target.value)} /></div></div><p className="muted">Kết quả dự kiến: {((end-start)/speed).toFixed(1)} giây</p><button className="primary wide" onClick={save}><Scissors size={16} /> Tạo bản MP3 mới</button></div></div>
 }
 
-function estimateOutputs(count: number, mode: string, k: number) {
-  if (!count || k < 1) return 0
-  if (mode === 'product_with_repetition') return count ** k
-  if (k > count) return 0
-  let value = 1; for (let i=0;i<k;i++) value *= count-i; return value
+function estimateOutputs(count: number, mode: string) {
+  if (mode === 'single_self_repeat') return count === 1 ? 1 : 0
+  if (count !== 2) return 0
+  return mode === 'pair_both_orders' || mode === 'pair_self_repeats' ? 2 : 1
 }
 
-function SequencePanel({ projectId, videos, sequences, refresh, guarded }: { projectId:string; videos:Asset[]; sequences:VideoSequence[]; refresh:()=>Promise<void>; guarded:Guard }) {
+function SequencePanel({ projectId, videos, sequences, outputs, jobs, refresh, guarded }: { projectId:string; videos:Asset[]; sequences:VideoSequence[]; outputs:Asset[]; jobs:Job[]; refresh:()=>Promise<void>; guarded:Guard }) {
   const newBatch = (index:number):BatchDraft => {
     const now = new Date()
     const time = `${String(now.getHours()).padStart(2,'0')}-${String(now.getMinutes()).padStart(2,'0')}`
-    return { id:crypto.randomUUID(), name:`Batch ${index} - ${time}`, selected:[], mode:'product_with_repetition', k:2, manual:[] }
+    return { id:crypto.randomUUID(), name:`Batch ${index} - ${time}`, selected:[], mode:'pair_once' }
   }
   const nextBatchIndex = (names:string[]) => names.reduce((highest, name) => {
     const match = /^Batch\s+(\d+)/i.exec(name)
@@ -576,10 +600,45 @@ function SequencePanel({ projectId, videos, sequences, refresh, guarded }: { pro
   const [batches, setBatches] = useState<BatchDraft[]>(() => [newBatch(nextBatchIndex(sequences.map(sequence => sequence.batch_name)))])
   const [uploading, setUploading] = useState(false)
   const [generatingAll, setGeneratingAll] = useState(false)
+  const [exportingBatch, setExportingBatch] = useState('')
+  const [exportingAllBatches, setExportingAllBatches] = useState(false)
+  const [downloadingBatch, setDownloadingBatch] = useState('')
+  const [globalBgmTracks, setGlobalBgmTracks] = useState<BgmTrack[]>([])
+  const [batchExportOptions, setBatchExportOptions] = useState<Record<string, BatchExportOptions>>({})
+  const [bulkExportOptions, setBulkExportOptions] = useState<BatchExportOptions>({muteOriginal:false,addBgm:false,bgmId:'',bgmVolume:0.25})
   const [dragOverBatch, setDragOverBatch] = useState<string|null>(null)
   const [selectedSourceIds, setSelectedSourceIds] = useState<Set<string>>(new Set())
   const labels = useMemo(() => Object.fromEntries(videos.map((v,i) => [v.id,String.fromCharCode(65+i)])), [videos])
   const update = (id:string, values:Partial<BatchDraft>) => setBatches(old => old.map(b => b.id === id ? {...b,...values}:b))
+  const commonBatchMode = batches.length && batches.every(batch => batch.mode === batches[0].mode) ? batches[0].mode : ''
+
+  useEffect(() => {
+    request<BgmTrack[]>('/bgm').then(setGlobalBgmTracks).catch(() => {})
+  }, [])
+
+  const exportOptionsFor = (batchName:string):BatchExportOptions => batchExportOptions[batchName] || {
+    muteOriginal:false,
+    addBgm:false,
+    bgmId:'',
+    bgmVolume:0.25,
+  }
+
+  function patchBatchExportOptions(batchName:string, values:Partial<BatchExportOptions>) {
+    setBatchExportOptions(old => ({...old, [batchName]:{...exportOptionsFor(batchName), ...values}}))
+  }
+
+  function applyBulkExportOptions(batchNames:string[]) {
+    setBatchExportOptions(old => {
+      const next = {...old}
+      for (const batchName of batchNames) next[batchName] = {...bulkExportOptions}
+      return next
+    })
+  }
+
+  function applyModeToAll(mode:string) {
+    if (!mode) return
+    setBatches(old => old.map(batch => ({...batch, mode})))
+  }
 
   function addBatch() {
     setBatches(old => {
@@ -592,9 +651,11 @@ function SequencePanel({ projectId, videos, sequences, refresh, guarded }: { pro
     await guarded(async()=>{
       setUploading(true)
       const batch = batchId ? batches.find(item => item.id === batchId) : undefined
-      const created = await uploadAssets(projectId, files, batch?.name)
+      // Keep surplus uploads in the source library; a pair claims only the two selected clips.
+      const created = await uploadAssets(projectId, files)
       if (batch && created.length) {
-        update(batch.id, {selected:[...batch.selected, ...created.filter(asset => asset.type === 'video').map(asset => asset.id)]})
+        const slots = Math.max(0, 2 - batch.selected.length)
+        update(batch.id, {selected:[...batch.selected, ...created.filter(asset => asset.type === 'video').map(asset => asset.id).slice(0, slots)]})
       }
       await refresh()
       setUploading(false)
@@ -607,6 +668,7 @@ function SequencePanel({ projectId, videos, sequences, refresh, guarded }: { pro
       if (b.id !== batchId) return b
       if (old.some(other => other.id !== batchId && other.selected.includes(videoId))) return b
       if (b.selected.includes(videoId)) return b // already in batch
+      if (b.selected.length >= 2) return b
       return { ...b, selected: [...b.selected, videoId] }
     }))
     setSelectedSourceIds(prev => { const next = new Set(prev); next.delete(videoId); return next })
@@ -625,7 +687,8 @@ function SequencePanel({ projectId, videos, sequences, refresh, guarded }: { pro
     setBatches(old => old.map(b => {
       if (b.id !== batchId) return b
       const usedElsewhere = new Set(old.filter(other => other.id !== batchId).flatMap(other => other.selected))
-      const toAdd = [...selectedSourceIds].filter(id => !b.selected.includes(id) && !usedElsewhere.has(id))
+      const slots = Math.max(0, 2 - b.selected.length)
+      const toAdd = [...selectedSourceIds].filter(id => !b.selected.includes(id) && !usedElsewhere.has(id)).slice(0, slots)
       return { ...b, selected: [...b.selected, ...toAdd] }
     }))
     setSelectedSourceIds(new Set())
@@ -638,7 +701,7 @@ function SequencePanel({ projectId, videos, sequences, refresh, guarded }: { pro
   async function generate(batch:BatchDraft) {
     await guarded(async()=>{
       await request(`/projects/${projectId}/sequences/generate`, jsonOptions('POST', {
-        video_asset_ids:batch.selected, mode:batch.mode, length:batch.k, limit:100, replace_existing:false, batch_name:batch.name
+        video_asset_ids:batch.selected, mode:batch.mode, length:2, limit:2, replace_existing:false, batch_name:batch.name
       }))
       await refresh()
     })
@@ -646,31 +709,21 @@ function SequencePanel({ projectId, videos, sequences, refresh, guarded }: { pro
 
   async function generateAll() {
     const valid = batches.filter(batch => {
-      const count = estimateOutputs(batch.selected.length, batch.mode, batch.k)
-      return batch.name.trim() && batch.selected.length > 0 && count > 0 && count <= 100
+      const count = estimateOutputs(batch.selected.length, batch.mode)
+      return batch.name.trim() && count > 0
     })
     if (!valid.length) return
     setGeneratingAll(true)
     await guarded(async()=>{
       for (const batch of valid) {
         await request(`/projects/${projectId}/sequences/generate`, jsonOptions('POST', {
-          video_asset_ids:batch.selected, mode:batch.mode, length:batch.k, limit:100,
+          video_asset_ids:batch.selected, mode:batch.mode, length:2, limit:2,
           replace_existing:false, batch_name:batch.name
         }))
       }
       await refresh()
     })
     setGeneratingAll(false)
-  }
-
-  async function manual(batch:BatchDraft) {
-    await guarded(async()=>{
-      await request(`/projects/${projectId}/sequences/manual`, jsonOptions('POST', {
-        name:batch.manual.map(id=>labels[id]).join('-'), video_asset_ids:batch.manual, batch_name:batch.name
-      }))
-      update(batch.id,{manual:[]})
-      await refresh()
-    })
   }
 
   async function toggleSequence(seq:VideoSequence){
@@ -686,24 +739,226 @@ function SequencePanel({ projectId, videos, sequences, refresh, guarded }: { pro
     })
   }
 
+  async function exportBatch(batchName:string, items:VideoSequence[]) {
+    const enabledItems = items.filter(item => item.enabled)
+    if (!enabledItems.length) return
+    const exportOptions = exportOptionsFor(batchName)
+    if (exportOptions.addBgm && !exportOptions.bgmId) throw new Error('Hãy chọn nhạc nền hoặc tắt tùy chọn thêm nhạc nền')
+    setExportingBatch(batchName)
+    await guarded(async()=>{
+      await request(`/projects/${projectId}/render/jobs`, jsonOptions('POST', {
+        items: enabledItems.map(item => ({
+          sequence_id:item.id,
+          audio_asset_id:null,
+          bgm_asset_id:exportOptions.addBgm ? exportOptions.bgmId : null,
+          source_audio_policy:exportOptions.muteOriginal ? 'mute' : 'keep_original',
+          bgm_volume:exportOptions.bgmVolume,
+        })),
+        allow_missing_audio:true,
+        allow_duplicate_audio:true,
+        duration_policy:'match_video',
+        source_audio_policy:exportOptions.muteOriginal ? 'mute' : 'keep_original',
+        resolution:'1920x1080',
+        fps:30,
+        video_encoder:'h264_nvenc',
+        fit_mode:'fit',
+        bgm_volume:exportOptions.bgmVolume,
+        run_name:batchName,
+        group_name:batchName,
+        output_folder:'batch-exports',
+      }))
+      await refresh()
+    })
+    setExportingBatch('')
+  }
+
+  async function exportAllBatches(groupsToExport:Array<[string,VideoSequence[]]>) {
+    const enabledItems = groupsToExport.flatMap(([, items]) => items.filter(item=>item.enabled))
+    if (!enabledItems.length) return
+    if (bulkExportOptions.addBgm && !bulkExportOptions.bgmId) return
+    setExportingAllBatches(true)
+    await guarded(async()=>{
+      applyBulkExportOptions(groupsToExport.map(([name])=>name))
+      await request(`/projects/${projectId}/render/jobs`, jsonOptions('POST', {
+        items:enabledItems.map(item=>({
+          sequence_id:item.id,
+          audio_asset_id:null,
+          bgm_asset_id:bulkExportOptions.addBgm ? bulkExportOptions.bgmId : null,
+          source_audio_policy:bulkExportOptions.muteOriginal ? 'mute' : 'keep_original',
+          bgm_volume:bulkExportOptions.bgmVolume,
+        })),
+        allow_missing_audio:true,
+        allow_duplicate_audio:true,
+        duration_policy:'match_video',
+        source_audio_policy:bulkExportOptions.muteOriginal ? 'mute' : 'keep_original',
+        resolution:'1920x1080',
+        fps:30,
+        video_encoder:'h264_nvenc',
+        fit_mode:'fit',
+        bgm_volume:bulkExportOptions.bgmVolume,
+        run_name:'batch-exports',
+        group_name:'batch-exports',
+        output_folder:'batch-exports',
+      }))
+      await refresh()
+    })
+    setExportingAllBatches(false)
+  }
+
+  async function downloadBatch(batchName:string, items:Asset[]) {
+    if (!items.length) return
+    setDownloadingBatch(batchName)
+    await guarded(async()=>{
+      const response = await fetch(`/api/projects/${projectId}/outputs/download`, jsonOptions('POST', {asset_ids:items.map(item=>item.id)}))
+      if (!response.ok) throw new Error(await response.text() || 'Không thể tải batch')
+      const url = URL.createObjectURL(await response.blob())
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `${batchName.replace(/[<>:"/\\|?*]/g,'-') || 'batch-video'}.zip`
+      document.body.appendChild(link); link.click(); link.remove()
+      window.setTimeout(()=>URL.revokeObjectURL(url), 1000)
+    })
+    setDownloadingBatch('')
+  }
+
   const groups = Object.entries(groupBy(sequences, sequence => sequence.batch_name || 'Batch 1'))
   const usedVideoIds = new Set(batches.flatMap(batch => batch.selected))
   const sourceVideos = videos.filter(video => !video.video_batch_name)
 
   return (
-    <section>
-      {/* ── Nguồn video: strip ngang trên đầu ── */}
+    <section className="sequence-workbench">
+      <div className="sequence-commandbar">
+        <div>
+          <h2>Ghép video</h2>
+          <p>Tạo và quản lý nhiều batch trên cùng một màn hình.</p>
+        </div>
+        <div className="sequence-command-actions">
+          <label className="batch-mode-all">
+            <span>Áp dụng cho tất cả</span>
+            <select value={commonBatchMode} onChange={e=>applyModeToAll(e.target.value)}>
+              {!commonBatchMode && <option value="">Nhiều thuật toán</option>}
+              <option value="single_self_repeat">1 video · A-A</option>
+              <option value="pair_once">2 video · A-B</option>
+              <option value="pair_both_orders">2 video · A-B & B-A</option>
+              <option value="pair_self_repeats">2 video · A-A & B-B</option>
+            </select>
+          </label>
+          <button className="secondary" disabled={generatingAll || !batches.some(batch => estimateOutputs(batch.selected.length, batch.mode) > 0)} onClick={generateAll}>
+            <Wand2 size={15}/>{generatingAll ? 'Đang sinh...' : 'Sinh hàng loạt'}
+          </button>
+          <button onClick={addBatch}><Plus size={15}/> Batch mới</button>
+        </div>
+      </div>
+
+      <div className="sequence-builder-layout">
+        <div className="sequence-main-column">
+          <div className="batch-table-head">
+            <span>Batch</span><span>Video đầu vào</span><span>Thuật toán</span><span>Kết quả</span><span>Thao tác</span>
+          </div>
+          <div className="batch-list batch-table-list">
+            {batches.map((batch, index) => {
+              const selectedVideos = batch.selected.map(id => videos.find(v => v.id === id)).filter(Boolean) as Asset[]
+              const outputCount = estimateOutputs(batch.selected.length, batch.mode)
+              const isDragOver = dragOverBatch === batch.id
+              return (
+                <div
+                  className={`batch-table-row${isDragOver ? ' drag-over' : ''}`}
+                  key={batch.id}
+                  onDragOver={e=>{ e.preventDefault(); setDragOverBatch(batch.id) }}
+                  onDragLeave={()=>setDragOverBatch(null)}
+                  onDrop={e=>{ e.preventDefault(); setDragOverBatch(null); const vid=e.dataTransfer.getData('videoId'); if(vid) addVideoToBatch(batch.id,vid) }}
+                >
+                  <div className="batch-identity">
+                    <span className="batch-number">{index+1}</span>
+                    <input className="batch-name" value={batch.name} onChange={e=>update(batch.id,{name:e.target.value})}/>
+                  </div>
+                  <div className="compact-video-slots">
+                    {[0,1].map(slot => {
+                      const video = selectedVideos[slot]
+                      return video ? <div className="compact-video-chip" key={video.id} title={video.display_name}>
+                        <div><video src={streamUrl(video.id)} preload="none" muted/><span>{labels[video.id]}</span></div>
+                        <b>{video.display_name}</b>
+                        <button title="Bỏ video" onClick={()=>removeVideoFromBatch(batch.id, video.id)}>×</button>
+                      </div> : <button className="empty-video-slot" key={slot} onClick={()=>addSelectedToBatch(batch.id)} title="Chọn video trong kho bên phải">
+                        <Plus size={14}/><span>Video {slot === 0 ? 'A' : 'B'}</span>
+                      </button>
+                    })}
+                  </div>
+                  <select className="compact-mode-select" value={batch.mode} onChange={e=>update(batch.id,{mode:e.target.value})}>
+                    <option value="single_self_repeat">1 video · A-A</option>
+                    <option value="pair_once">2 video · A-B</option>
+                    <option value="pair_both_orders">A-B & B-A</option>
+                    <option value="pair_self_repeats">A-A & B-B</option>
+                  </select>
+                  <div className={`compact-estimate${outputCount ? ' valid' : ''}`}><b>{outputCount}</b><span>output</span></div>
+                  <div className="compact-batch-actions">
+                    {selectedSourceIds.size > 0 && <button className="add-selected-button" onClick={()=>addSelectedToBatch(batch.id)} title={`Thêm ${selectedSourceIds.size} video đã chọn`}><Plus size={15}/><span>{selectedSourceIds.size}</span></button>}
+                    <label className="icon-button" title="Tải video vào batch"><Upload size={14}/><input hidden multiple type="file" accept="video/*" disabled={uploading} onChange={e=>{ const files=Array.from(e.target.files || []); e.target.value=''; void upload(files,batch.id) }}/></label>
+                    <button className="primary compact-generate" disabled={!outputCount} onClick={()=>generate(batch)}><Play size={14} fill="currentColor"/> Sinh</button>
+                    <button className="row-delete" title="Xóa batch nháp" onClick={()=>{ if (!batch.selected.length || confirm(`Xóa batch nháp ${batch.name}?`)) setBatches(old=>old.filter(b=>b.id!==batch.id)) }}><Trash2 size={14}/></button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          <details className="saved-sequences" open={groups.length > 0}>
+            <summary><span>Sequence đã tạo</span><b>{sequences.length}</b><small>Nhấn để thu gọn</small></summary>
+            <div className="saved-sequence-body">
+              {groups.length === 0 && <div className="saved-empty">Chưa có sequence. Hoàn thiện một batch rồi nhấn Sinh.</div>}
+              {groups.length > 0 && <div className="batch-bulk-export-bar">
+                <strong>Xuất hàng loạt</strong>
+                <button type="button" className={`batch-sound-toggle${bulkExportOptions.muteOriginal?' muted':''}`} onClick={()=>setBulkExportOptions(old=>({...old,muteOriginal:!old.muteOriginal}))}>
+                  {bulkExportOptions.muteOriginal?<VolumeX size={14}/>:<Volume2 size={14}/>} {bulkExportOptions.muteOriginal?'Tắt tiếng gốc':'Bật tiếng gốc'}
+                </button>
+                <label className="batch-bgm-toggle"><input type="checkbox" checked={bulkExportOptions.addBgm} onChange={e=>setBulkExportOptions(old=>({...old,addBgm:e.target.checked}))}/><Music size={13}/> Thêm nhạc nền</label>
+                {bulkExportOptions.addBgm && <>
+                  <select value={bulkExportOptions.bgmId} onChange={e=>setBulkExportOptions(old=>({...old,bgmId:e.target.value}))}><option value="">Chọn nhạc nền...</option>{globalBgmTracks.map(track=><option key={track.id} value={track.id}>{track.display_name}</option>)}</select>
+                  <label className="batch-bgm-volume"><span>{Math.round(bulkExportOptions.bgmVolume*100)}%</span><input type="range" min="0" max="1" step="0.05" value={bulkExportOptions.bgmVolume} onChange={e=>setBulkExportOptions(old=>({...old,bgmVolume:+e.target.value}))}/></label>
+                </>}
+                <button className="batch-export-all-button" disabled={exportingAllBatches||(bulkExportOptions.addBgm&&!bulkExportOptions.bgmId)} onClick={()=>exportAllBatches(groups)}>{exportingAllBatches?<LoaderCircle className="spin" size={14}/>:<Clapperboard size={14}/>} {exportingAllBatches?'Đang tạo hàng loạt...':`Sinh đồng thời ${sequences.filter(sequence=>sequence.enabled).length} video`}</button>
+              </div>}
+              {groups.map(([name,items])=>{ const batchOutputs=outputs.filter(output=>output.metadata_json?.batch_name===name&&!output.metadata_json?.audio_asset_id); const activeJobs=jobs.filter(job=>job.kind==='render'&&job.input_json?.batch_name===name&&!job.input_json?.audio_asset_id&&['queued','running','rendering','processing'].includes(job.status)); const exportOptions=exportOptionsFor(name); return <div className="saved-batch-row" key={name}>
+                <div className="saved-batch-title"><strong>{name}</strong><span>{items.length} sequence</span></div>
+                <div className="saved-sequence-chips">{items.map(seq=><label className={seq.enabled?'enabled':''} key={seq.id}>
+                  <input type="checkbox" checked={seq.enabled} onChange={()=>toggleSequence(seq)}/><span>{seq.name}</span>
+                </label>)}</div>
+                <div className="batch-export-audio">
+                  <button type="button" className={`batch-sound-toggle${exportOptions.muteOriginal?' muted':''}`} onClick={()=>patchBatchExportOptions(name,{muteOriginal:!exportOptions.muteOriginal})}>
+                    {exportOptions.muteOriginal?<VolumeX size={13}/>:<Volume2 size={13}/>} {exportOptions.muteOriginal?'Tắt tiếng gốc':'Bật tiếng gốc'}
+                  </button>
+                  <label className="batch-bgm-toggle"><input type="checkbox" checked={exportOptions.addBgm} onChange={e=>patchBatchExportOptions(name,{addBgm:e.target.checked})}/><Music size={12}/> Thêm nhạc nền</label>
+                  {exportOptions.addBgm && <>
+                    <select aria-label={`Chọn nhạc nền cho ${name}`} value={exportOptions.bgmId} onChange={e=>patchBatchExportOptions(name,{bgmId:e.target.value})}>
+                      <option value="">Chọn nhạc nền...</option>
+                      {globalBgmTracks.map(track=><option key={track.id} value={track.id}>{track.display_name}</option>)}
+                    </select>
+                    <label className="batch-bgm-volume" title={`Âm lượng nhạc nền ${Math.round(exportOptions.bgmVolume*100)}%`}><span>{Math.round(exportOptions.bgmVolume*100)}%</span><input type="range" min="0" max="1" step="0.05" value={exportOptions.bgmVolume} onChange={e=>patchBatchExportOptions(name,{bgmVolume:+e.target.value})}/></label>
+                  </>}
+                </div>
+                <div className="saved-batch-actions">
+                  {activeJobs.length > 0 ? <span className="batch-export-progress"><LoaderCircle className="spin" size={13}/>{activeJobs.length} đang xuất</span> : batchOutputs.length > 0 ? <button className="batch-download-button" disabled={downloadingBatch===name} onClick={()=>downloadBatch(name,batchOutputs)}><Download size={13}/>{downloadingBatch===name?'Đang tải...':`Tải ${batchOutputs.length} video`}</button> : <button className="batch-export-button" disabled={exportingBatch===name||!items.some(item=>item.enabled)||(exportOptions.addBgm&&!exportOptions.bgmId)} onClick={()=>exportBatch(name,items)}><Clapperboard size={13}/>{exportingBatch===name?'Đang tạo...':'Xuất video gốc'}</button>}
+                  {batchOutputs.length > 0 && !activeJobs.length && <button className="batch-export-again" disabled={exportingBatch===name||(exportOptions.addBgm&&!exportOptions.bgmId)} onClick={()=>exportBatch(name,items)} title="Xuất lại với cài đặt âm thanh hiện tại"><RefreshCw size={13}/></button>}
+                  <button className="row-delete" onClick={()=>deleteSavedBatch(name)} title="Xóa batch"><Trash2 size={14}/></button>
+                </div>
+              </div>})}
+            </div>
+          </details>
+        </div>
+
+        <aside className="video-library-panel">
       <div className="video-source-strip">
         <div className="video-source-strip-header">
           <div>
-            <h3>Nguồn video</h3>
-            <p>Click để chọn · kéo vào batch · {sourceVideos.length} clip{selectedSourceIds.size > 0 ? ` · ${selectedSourceIds.size} đã chọn` : ''}</p>
+            <h3>Kho video <span>{sourceVideos.length}</span></h3>
+            <p>Chọn hoặc kéo vào batch</p>
           </div>
           <label className="button small">
             <Upload size={14}/>{uploading ? 'Đang thêm...' : 'Thêm video'}
             <input hidden multiple type="file" accept="video/*" disabled={uploading} onChange={e=>upload(e.target.files)}/>
           </label>
         </div>
+        {selectedSourceIds.size > 0 && <div className="library-selection-status"><CheckCircle2 size={14}/><b>{selectedSourceIds.size} đã chọn</b><button onClick={()=>setSelectedSourceIds(new Set())}>Bỏ chọn</button></div>}
         <div className="video-source-cards">
           {sourceVideos.length === 0
             ? <div className="video-source-empty"><Layers3 size={22} opacity={.4}/><span>Chưa có video. Nhập file từ Media hoặc nút Thêm video.</span></div>
@@ -720,13 +975,13 @@ function SequencePanel({ projectId, videos, sequences, refresh, guarded }: { pro
                   onDragStart={e => { if (isUsed) { e.preventDefault(); return }; e.dataTransfer.setData('videoId', video.id) }}
                 >
                   <div className="video-source-card-thumb">
-                    <video src={streamUrl(video.id)} preload="metadata" muted onClick={e => e.stopPropagation()}/>
+                    <video src={streamUrl(video.id)} preload="none" muted onClick={e => e.stopPropagation()}/>
                     <span className="media-label-badge">{labels[video.id]}</span>
                     {isUsed
                       ? <div className="video-source-used">Đã dùng</div>
                       : isSel
                       ? <div className="video-source-check">✓</div>
-                      : <div className="video-source-drag-hint">Kéo / Chọn</div>
+                      : <div className="video-source-drag-hint">Kéo vào batch</div>
                     }
                   </div>
                   <div className="video-source-card-info">
@@ -739,138 +994,8 @@ function SequencePanel({ projectId, videos, sequences, refresh, guarded }: { pro
           }
         </div>
       </div>
-
-      {/* ── Batch section ── */}
-      <div className="section-title" style={{marginTop:'28px'}}>
-        <div><h2>Batch video độc lập</h2><p>Mỗi batch có nguồn, K và thuật toán riêng.</p></div>
-        <div className="header-actions">
-          <button className="secondary" disabled={generatingAll || !batches.some(batch => batch.selected.length && estimateOutputs(batch.selected.length, batch.mode, batch.k) <= 100)} onClick={generateAll}>
-            <Wand2 size={16}/>{generatingAll ? 'Đang sinh tất cả...' : 'Sinh chuỗi hàng loạt'}
-          </button>
-          <button onClick={addBatch}><Plus size={16}/> Thêm batch</button>
-        </div>
+        </aside>
       </div>
-
-      <div className="batch-list">
-        {batches.map((batch, index) => {
-          const selectedVideos = batch.selected.map(id => videos.find(v => v.id === id)).filter(Boolean) as Asset[]
-          const outputCount = estimateOutputs(batch.selected.length, batch.mode, batch.k)
-          const isDragOver = dragOverBatch === batch.id
-          return (
-            <div
-              className={`panel batch-card${isDragOver ? ' drag-over' : ''}`}
-              key={batch.id}
-              onDragOver={e=>{ e.preventDefault(); setDragOverBatch(batch.id) }}
-              onDragLeave={()=>setDragOverBatch(null)}
-              onDrop={e=>{ e.preventDefault(); setDragOverBatch(null); const vid=e.dataTransfer.getData('videoId'); if(vid) addVideoToBatch(batch.id,vid) }}
-            >
-              {/* Batch header */}
-              <div className="panel-heading">
-                <div>
-                  <span className="batch-number">{index+1}</span>
-                  <input className="batch-name" value={batch.name} onChange={e=>update(batch.id,{name:e.target.value})}/>
-                </div>
-                <div className="header-actions">
-                  {selectedSourceIds.size > 0 && (
-                    <button className="secondary" style={{color:'#7ddfb8',borderColor:'#2a4a3e'}} onClick={()=>addSelectedToBatch(batch.id)}>
-                      <Plus size={14}/> Thêm {selectedSourceIds.size} đã chọn
-                    </button>
-                  )}
-                  <label className="button small">
-                    <Upload size={13}/> Thêm file
-                    <input hidden multiple type="file" accept="video/*" disabled={uploading} onChange={e=>{ const files=Array.from(e.target.files || []); e.target.value=''; void upload(files,batch.id) }}/>
-                  </label>
-                  <button className="danger-button" title="Xóa batch nháp" onClick={()=>{
-                    if (!batch.selected.length || confirm(`Xóa batch nháp ${batch.name}?`)) setBatches(old=>old.filter(b=>b.id!==batch.id))
-                  }}><Trash2 size={14}/></button>
-                </div>
-              </div>
-
-              {/* Drop zone / selected videos */}
-              <div className={`batch-drop-zone${selectedVideos.length === 0 ? ' empty' : ''}`}>
-                {selectedVideos.length === 0 ? (
-                  <div className="batch-drop-hint">
-                    <Layers3 size={28} opacity={.4}/>
-                    <span>Kéo video từ nguồn ở trên · hoặc chọn video rồi nhấn "Thêm đã chọn"</span>
-                  </div>
-                ) : (
-                  <div className="batch-selected-videos">
-                    {selectedVideos.map(video => (
-                      <div className="batch-video-chip" key={video.id}>
-                        <div className="batch-chip-thumb">
-                          <video src={streamUrl(video.id)} preload="metadata" muted/>
-                          <span className="media-label-badge">{labels[video.id]}</span>
-                        </div>
-                        <span className="batch-chip-name" title={video.display_name}>{video.display_name}</span>
-                        <button
-                          className="batch-chip-remove"
-                          title="Xóa khỏi batch"
-                          onClick={()=>removeVideoFromBatch(batch.id, video.id)}
-                        >×</button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Controls */}
-              <div className="batch-controls">
-                <div>
-                  <label>Thuật toán</label>
-                  <select value={batch.mode} onChange={e=>update(batch.id,{mode:e.target.value})}>
-                    <option value="product_with_repetition">Có lặp (A-A, A-B...)</option>
-                    <option value="permutation">Không lặp (A-B, B-A...)</option>
-                  </select>
-                </div>
-                <div>
-                  <label>K - số clip/output</label>
-                  <input type="number" min="1" max="10" value={batch.k} onChange={e=>update(batch.id,{k:+e.target.value})}/>
-                </div>
-                <div className="estimate">
-                  <span>Dự kiến</span>
-                  <b>{outputCount.toLocaleString()} output</b>
-                </div>
-                <button
-                  className="primary"
-                  disabled={!batch.selected.length || outputCount > 100}
-                  onClick={()=>generate(batch)}
-                >Sinh chuỗi</button>
-              </div>
-
-              {/* Manual timeline */}
-              <div className="manual-line">
-                <span>Timeline:</span>
-                {selectedVideos.map(v=>(
-                  <button key={v.id} onClick={()=>update(batch.id,{manual:[...batch.manual,v.id]})}>+ {labels[v.id]}</button>
-                ))}
-                <div className="timeline">
-                  {batch.manual.map((id,i)=>(
-                    <button key={`${id}-${i}`} onClick={()=>update(batch.id,{manual:batch.manual.filter((_,x)=>x!==i)})}>{labels[id]} ×</button>
-                  ))}
-                </div>
-                <button className="secondary" disabled={!batch.manual.length} onClick={()=>manual(batch)}>Lưu timeline</button>
-              </div>
-            </div>
-          )
-        })}
-      </div>
-
-      {/* Sequences created */}
-      <h2 className="top-gap">Sequence đã tạo</h2>
-      {groups.map(([name,items])=>(
-        <div className="panel sequence-group" key={name}>
-          <div className="panel-heading"><h3>{name} <span className="count">{items.length}</span></h3><button className="danger-button" onClick={()=>deleteSavedBatch(name)}><Trash2 size={14}/> Xóa batch</button></div>
-          <div className="sequence-list">
-            {items.map(seq=>(
-              <label className={seq.enabled?'sequence enabled':'sequence'} key={seq.id}>
-                <input type="checkbox" checked={seq.enabled} onChange={()=>toggleSequence(seq)}/>
-                <strong>{seq.name}</strong>
-                <span>{seq.items.map(i=>i.asset.display_name).join(' → ')}</span>
-              </label>
-            ))}
-          </div>
-        </div>
-      ))}
     </section>
   )
 }
@@ -879,12 +1004,14 @@ function SequencePreviewModal({
   sequence,
   assignment,
   audios,
+  bgmTracks,
   patchAssignment,
   close,
 }: {
   sequence: VideoSequence
   assignment: Assignment
   audios: Asset[]
+  bgmTracks: BgmTrack[]
   patchAssignment: (id: string, values: Partial<Assignment>) => void
   close: () => void
 }) {
@@ -900,7 +1027,7 @@ function SequencePreviewModal({
   const currentClip = clips[clipIndex]?.asset
 
   const voiceAsset = audios.find(a => a.id === assignment.audioId)
-  const bgmAsset = audios.find(a => a.id === assignment.bgmId)
+  const bgmAsset = bgmTracks.find(track => track.id === assignment.bgmId)
 
   const totalClipsMs = useMemo(() => clips.reduce((acc, c) => acc + (c.asset.duration_ms || 0), 0), [clips])
   const totalClipsSec = totalClipsMs / 1000 || 10
@@ -1019,7 +1146,7 @@ function SequencePreviewModal({
             }} />
           )}
           {bgmAsset && (
-            <audio ref={bgmRef} src={streamUrl(bgmAsset.id)} loop />
+            <audio ref={bgmRef} src={bgmStreamUrl(bgmAsset.id)} loop />
           )}
 
           <div className="preview-clip-badge">
@@ -1105,25 +1232,34 @@ function SequencePreviewModal({
   )
 }
 
-function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, setTab, refresh }: any) {
+function RenderPanel({ projectId, audios, sequences, outputs, jobs, system, guarded, setTab, refresh }: any) {
   const enabled: VideoSequence[] = sequences.filter((s: VideoSequence) => s.enabled)
   const [assignments, setAssignments] = useState<Record<string, Assignment>>(() => {
     try { return JSON.parse(localStorage.getItem(`assignments:${projectId}`) || '{}') } catch { return {} }
   })
   useEffect(()=>{ localStorage.setItem(`assignments:${projectId}`, JSON.stringify(assignments)) },[assignments,projectId])
-  const [allowDuplicate, setAllowDuplicate] = useState(false)
+  const allowDuplicate = false
   const [allowMissing, setAllowMissing] = useState(false)
-  const [runName, setRunName] = useState('san-pham')
-  const [groupName, setGroupName] = useState('Nhóm render 1')
   const [outputFolder, setOutputFolder] = useState('renders')
   const [resolution, setResolution] = useState('1080x1920')
   const [encoder, setEncoder] = useState('h264_nvenc')
   const [fit, setFit] = useState('fit')
-  const [durationPolicy, setDurationPolicy] = useState('match_audio_loop_video')
+  const durationPolicy = 'extend_video_to_audio'
   const [audioTab, setAudioTab] = useState<'voice' | 'bgm'>('voice')
   const [voiceGroupFilter, setVoiceGroupFilter] = useState('all')
   const [uploadingBgm, setUploadingBgm] = useState(false)
   const [globalBgmTracks, setGlobalBgmTracks] = useState<BgmTrack[]>([])
+  const today = new Date().getDate()
+  const renderNamePattern = new RegExp(`^${today}-(\\d+)$`)
+  const usedRenderNames = [
+    ...(jobs as Job[]).filter(job => job.kind === 'render').map(job => String(job.input_json.group_name || '')),
+    ...(outputs as Asset[]).map(output => String(output.metadata_json.group_name || '')),
+  ]
+  const nextRenderIndex = usedRenderNames.reduce((highest, name) => {
+    const match = renderNamePattern.exec(name)
+    return match ? Math.max(highest, Number(match[1])) : highest
+  }, 0) + 1
+  const automaticRenderName = `${today}-${nextRenderIndex}`
 
   // Fetch global BGM library
   useEffect(() => {
@@ -1134,9 +1270,8 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
     try { setGlobalBgmTracks(await request<BgmTrack[]>('/bgm')) } catch {}
   }
   const [previewSeq, setPreviewSeq] = useState<VideoSequence | null>(null)
-  const [batchFilter, setBatchFilter] = useState<string[] | 'all'>('all')
+  const [batchFilter, setBatchFilter] = useState<string[] | 'all'>([])
   const [selectedIds, setSelectedIds] = useState<string[]>([])
-  const selectionInitialized = useRef(false)
   const batchNames = Array.from(new Set(enabled.map(seq => seq.batch_name))) as string[]
   const visibleSequences = batchFilter === 'all' ? enabled : enabled.filter(seq => batchFilter.includes(seq.batch_name))
   const selectedSequences = visibleSequences.filter(seq => selectedIds.includes(seq.id))
@@ -1151,10 +1286,19 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
   function toggleBatchFilter(batchName: string) {
     setBatchFilter(current => {
       const selected = current === 'all' ? batchNames : current
-      return selected.includes(batchName)
-        ? selected.filter(name => name !== batchName)
-        : [...selected, batchName]
+      const removing = selected.includes(batchName)
+      const sequenceIds = enabled.filter(seq => seq.batch_name === batchName).map(seq => seq.id)
+      setSelectedIds(old => removing
+        ? old.filter(id => !sequenceIds.includes(id))
+        : Array.from(new Set([...old, ...sequenceIds])))
+      return removing ? selected.filter(name => name !== batchName) : [...selected, batchName]
     })
+  }
+
+  function selectAllBatches() {
+    const selectingAll = batchFilter !== 'all'
+    setBatchFilter(selectingAll ? 'all' : [])
+    setSelectedIds(selectingAll ? enabled.map(seq => seq.id) : [])
   }
 
   useEffect(() => {
@@ -1179,10 +1323,7 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
 
   useEffect(() => {
     const validIds = enabled.map(seq => seq.id)
-    if (!selectionInitialized.current && validIds.length) {
-      setSelectedIds(validIds)
-      selectionInitialized.current = true
-    } else setSelectedIds(old => old.filter(id => validIds.includes(id)))
+    setSelectedIds(old => old.filter(id => validIds.includes(id)))
   }, [sequences])
 
   const assigned = (id: string): Assignment =>
@@ -1203,7 +1344,10 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
   }
 
   // Phân loại audio
-  const voiceAudios = audios.filter((a: Asset) => a.type === 'tts_audio' || (!a.display_name.toLowerCase().includes('bgm') && a.type !== 'external_audio'))
+  const voiceAudios = audios.filter((a: Asset) =>
+    a.type === 'tts_audio'
+    || (!!a.metadata_json.group_name && !a.display_name.toLowerCase().includes('bgm'))
+  )
   // bgmAudios replaced by globalBgmTracks (global BGM library)
   const bgmAudios = globalBgmTracks
   const voiceGroups = Array.from(new Set(voiceAudios.map((a: Asset) => String(a.metadata_json.group_name || '')).filter(Boolean))) as string[]
@@ -1280,6 +1424,18 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
     })
   }
 
+  function setBgmVolumeForSelected(volume: number) {
+    const safeVolume = Math.min(1, Math.max(0, volume))
+    setAssignments(old => {
+      const next = {...old}
+      for (const seq of selectedSequences) {
+        const current = assigned(seq.id)
+        next[seq.id] = { ...current, bgmVolume: safeVolume }
+      }
+      return next
+    })
+  }
+
   async function deleteRenderSequence(sequence: VideoSequence) {
     if (!confirm(`Xóa video ${sequence.name} khỏi ${sequence.batch_name}?`)) return
     await guarded(async () => {
@@ -1304,11 +1460,11 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
               source_audio_policy: a.muteOriginal ? 'mute' : 'mix',
               voice_volume: a.voiceVolume ?? 1.0,
               bgm_volume: a.bgmVolume ?? 1.0,
-              custom_name: runName,
+              custom_name: automaticRenderName,
             }
           }),
-          run_name: runName,
-          group_name: groupName,
+          run_name: automaticRenderName,
+          group_name: automaticRenderName,
           output_folder: outputFolder,
           allow_missing_audio: allowMissing,
           allow_duplicate_audio: allowDuplicate,
@@ -1331,7 +1487,7 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
       <div className="section-title">
         <div>
           <h2>Gán audio & nhạc nền cho từng video</h2>
-          <p>Chọn video, chọn nhóm audio rồi gán tay hoặc gán ngẫu nhiên hàng loạt. Audio đã dùng được loại khỏi danh sách.</p>
+          <p>Chọn nhóm audio rồi gán riêng trong từng video, hoặc gán tự động hàng loạt. Audio đã dùng sẽ tự ẩn khỏi danh sách.</p>
         </div>
       </div>
 
@@ -1379,7 +1535,7 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
         {audioTab === 'voice' ? (
           <div className="audio-tray-scroll">
             {availableFilteredVoiceAudios.length === 0 ? (
-              <p className="muted" style={{padding:'12px'}}>{filteredVoiceAudios.length ? 'Tất cả audio trong nhóm này đã được gán. Tháo audio khỏi video để sử dụng lại.' : 'Chưa có giọng đọc. Hãy vào tab "Tạo giọng" để sinh audio TTS.'}</p>
+              <p className="muted" style={{padding:'12px'}}>{filteredVoiceAudios.length ? 'Tất cả audio trong nhóm này đã được gán.' : 'Chưa có audio trong nhóm này. Hãy vào tab "Tạo giọng" để sinh audio TTS.'}</p>
             ) : (
               availableFilteredVoiceAudios.map((a: Asset) => (
                 <article
@@ -1458,7 +1614,7 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
                 <input
                   type="checkbox"
                   checked={batchFilter === 'all'}
-                  onChange={() => setBatchFilter('all')}
+                  onChange={selectAllBatches}
                 />
                 <span>Tất cả batch</span>
               </label>
@@ -1481,6 +1637,19 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
         </button>
         <button className="secondary" disabled={!selectedSequences.length} onClick={()=>setMuteForSelected(true)}><VolumeX size={14}/> Tắt tiếng hàng loạt</button>
         <button className="secondary" disabled={!selectedSequences.length} onClick={()=>setMuteForSelected(false)}><Volume2 size={14}/> Bật tiếng hàng loạt</button>
+        <label className="batch-volume-field">
+          <span>Âm lượng BGM chọn</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.02"
+            value={selectedSequences.length ? Math.min(1, Math.max(0, selectedSequences.reduce((sum, seq) => sum + (assigned(seq.id).bgmVolume ?? 1), 0) / selectedSequences.length)) : 0.5}
+            disabled={!selectedSequences.length}
+            onChange={e => setBgmVolumeForSelected(+e.target.value)}
+          />
+          <b>{selectedSequences.length ? `${Math.round((selectedSequences.reduce((sum, seq) => sum + (assigned(seq.id).bgmVolume ?? 1), 0) / selectedSequences.length) * 100)}%` : '0%'}</b>
+        </label>
         <span>{selectedSequences.length}/{visibleSequences.length} video được chọn</span>
       </div>
 
@@ -1489,7 +1658,7 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
         {visibleSequences.map(seq => {
           const a = assigned(seq.id)
           const voice = audios.find((x: Asset) => x.id === a.audioId)
-          const bgm = audios.find((x: Asset) => x.id === a.bgmId)
+          const bgm = globalBgmTracks.find((track: BgmTrack) => track.id === a.bgmId)
 
           return (
             <article
@@ -1506,7 +1675,7 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
             >
               <div className="render-preview">
                 {seq.items.map((item, index) => (
-                  <video key={item.id} controls muted preload="metadata" src={streamUrl(item.asset.id)} className={index === 0 ? 'main-preview' : 'mini-preview'} />
+                  <video key={item.id} controls muted preload="none" src={streamUrl(item.asset.id)} className={index === 0 ? 'main-preview' : 'mini-preview'} />
                 ))}
               </div>
 
@@ -1530,9 +1699,11 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
                     <span>Giọng đọc (Voice)</span>
                   </div>
                   <select aria-label="Chọn giọng đọc cho video" value={a.audioId} onChange={e=>patchAssignment(seq.id,{audioId:e.target.value})}>
-                    <option value="">Chọn audio chưa gán…</option>
+                    <option value="">Chọn audio trong nhóm…</option>
                     {voice && <option value={voice.id}>{voice.display_name} · đang gán</option>}
-                    {filteredVoiceAudios.filter((audio:Asset)=>audio.id!==a.audioId && (allowDuplicate || !usedVoiceAudioIds.has(audio.id))).map((audio:Asset)=><option key={audio.id} value={audio.id}>{audio.display_name}{usedVoiceAudioIds.has(audio.id)?' · đã dùng (cần xác nhận)':''}</option>)}
+                    {filteredVoiceAudios
+                      .filter((audio:Asset) => audio.id !== a.audioId && !usedVoiceAudioIds.has(audio.id))
+                      .map((audio:Asset) => <option key={audio.id} value={audio.id}>{audio.display_name}</option>)}
                   </select>
                   {voice ? (
                     <div className="slot-content">
@@ -1605,19 +1776,18 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
 
       <div className="render-permissions">
         <p>{selectedSequences.length} video được chọn · {missingAudioCount} video còn thiếu audio</p>
-        <label><input type="checkbox" checked={allowDuplicate} onChange={e=>setAllowDuplicate(e.target.checked)}/> Cho phép dùng trùng khi gán tay (cần xác nhận)</label>
         <label><input type="checkbox" checked={allowMissing} onChange={e=>setAllowMissing(e.target.checked)}/> Cho phép xuất video thiếu audio</label>
       </div>
       {/* ── Render Settings Panel ── */}
       <div className="panel render-settings">
-        <div><label>Tên nhóm render</label><input maxLength={100} value={groupName} onChange={e => setGroupName(e.target.value)} placeholder="Ví dụ: Nhóm túi xách 01" /></div>
+        <div><label>Tên nhóm render</label><input value={automaticRenderName} readOnly title="Tự động tăng theo ngày trong project này" /></div>
         <div><label>Thư mục output</label><input value={outputFolder} onChange={e => setOutputFolder(e.target.value)} placeholder="Ví dụ: chien-dich-thang-9" /></div>
-        <div><label>Tên file output (tự thêm index)</label><input value={runName} onChange={e => setRunName(e.target.value)} placeholder="Ví dụ: gocdoxinh" /></div>
+        <div><label>Tên file output</label><input value={`${automaticRenderName}-v1, ${automaticRenderName}-v2, ...`} readOnly title="Mỗi video tự động nhận số v1, v2..." /></div>
         <div><label>Tỷ lệ video</label><select value={resolution} onChange={e => setResolution(e.target.value)}><option value="1080x1920">9:16 · 1080×1920</option><option value="1920x1080">16:9 · 1920×1080</option><option value="1280x720">16:9 · 1280×720</option></select></div>
         <div><label>Khung hình</label><select value={fit} onChange={e => setFit(e.target.value)}><option value="fit">Fit + viền</option><option value="fill">Fill + crop</option></select></div>
-        <div><label>Độ dài</label><select value={durationPolicy} onChange={e => setDurationPolicy(e.target.value)}><option value="match_audio_loop_video">Theo audio</option><option value="match_video">Theo video</option><option value="shortest">Nguồn ngắn hơn</option></select></div>
+        <div><label>Độ dài</label><input value="A + B, tự loop nếu audio dài hơn" readOnly title="Giữ toàn bộ A+B; nếu audio dài hơn thì lặp chuỗi video đến đủ audio" /></div>
         <div><label>Encoder</label><select value={encoder} onChange={e => setEncoder(e.target.value)}><option value="libx264">CPU · libx264</option><option value="h264_nvenc">GPU · NVENC{system?.media?.nvenc === false ? ' (chưa khả dụng)' : ''}</option></select></div>
-        <button className="primary" disabled={!selectedSequences.length || !groupName.trim() || !runName.trim() || !outputFolder.trim() || (!allowMissing && missingAudioCount>0)} onClick={render}><Clapperboard size={16} /> Render {selectedSequences.length} video</button>
+        <button className="primary" disabled={!selectedSequences.length || !outputFolder.trim() || (!allowMissing && missingAudioCount>0)} onClick={render}><Clapperboard size={16} /> Render {selectedSequences.length} video</button>
       </div>
 
       {outputs.length > 0 && (
@@ -1640,6 +1810,7 @@ function RenderPanel({ projectId, audios, sequences, outputs, system, guarded, s
           sequence={previewSeq}
           assignment={assigned(previewSeq.id)}
           audios={audios}
+          bgmTracks={globalBgmTracks}
           patchAssignment={patchAssignment}
           close={() => setPreviewSeq(null)}
         />
@@ -1652,6 +1823,9 @@ function JobsPanel({ jobs, outputs, refresh, guarded }: { jobs:Job[]; outputs:As
   const [renameNames,setRenameNames]=useState<Record<string,string>>({})
   const [allOutputsName,setAllOutputsName]=useState('')
   const [selectedOutputIds,setSelectedOutputIds]=useState<string[]>([])
+  const [editingOutputId,setEditingOutputId]=useState<string|null>(null)
+  const [editingOutputName,setEditingOutputName]=useState('')
+  const outputNameInputRef=useRef<HTMLInputElement>(null)
   const [downloading,setDownloading]=useState(false)
   const [downloadProgress,setDownloadProgress]=useState('')
   const [selectingFolder,setSelectingFolder]=useState<string|null>(null)
@@ -1683,6 +1857,31 @@ function JobsPanel({ jobs, outputs, refresh, guarded }: { jobs:Job[]; outputs:As
     const ordered=[...outputs].sort((a,b)=>String(a.metadata_json?.run_folder||'').localeCompare(String(b.metadata_json?.run_folder||''),'vi')||Number(a.metadata_json.output_index||0)-Number(b.metadata_json.output_index||0)||new Date(a.created_at).getTime()-new Date(b.created_at).getTime())
     await guarded(async()=>{await request(`/projects/${ordered[0].project_id}/outputs/rename`,jsonOptions('PATCH',{asset_ids:ordered.map(item=>item.id),base_name:baseName}));setAllOutputsName('');await refresh()})
   }
+  function startRenameOutput(asset:Asset){
+    const dot=asset.display_name.lastIndexOf('.')
+    const currentName=dot>0?asset.display_name.slice(0,dot):asset.display_name
+    setSelectedOutputIds([asset.id])
+    setEditingOutputId(asset.id)
+    setEditingOutputName(currentName)
+    requestAnimationFrame(()=>outputNameInputRef.current?.select())
+  }
+  async function saveSingleOutputName(asset:Asset){
+    const dot=asset.display_name.lastIndexOf('.')
+    const currentName=dot>0?asset.display_name.slice(0,dot):asset.display_name
+    const nextName=editingOutputName.trim()
+    if(!nextName||nextName===currentName){setEditingOutputId(null);return}
+    await guarded(async()=>{await request(`/assets/${asset.id}/output-name`,jsonOptions('PATCH',{name:nextName}));setEditingOutputId(null);await refresh()})
+  }
+  useEffect(()=>{
+    const handleKeyDown=(event:KeyboardEvent)=>{
+      if(event.key!=='F2'||editingOutputId)return
+      const selected=outputs.find(item=>item.id===selectedOutputIds[selectedOutputIds.length-1])
+      if(!selected)return
+      event.preventDefault();startRenameOutput(selected)
+    }
+    window.addEventListener('keydown',handleKeyDown)
+    return()=>window.removeEventListener('keydown',handleKeyDown)
+  },[editingOutputId,outputs,selectedOutputIds])
   function toggleOutputGroup(items:Asset[]){
     const ids=items.map(item=>item.id); const all=ids.every(id=>selectedOutputIds.includes(id))
     setSelectedOutputIds(old=>all?old.filter(id=>!ids.includes(id)):Array.from(new Set([...old,...ids])))
@@ -1690,6 +1889,33 @@ function JobsPanel({ jobs, outputs, refresh, guarded }: { jobs:Job[]; outputs:As
   async function chooseDownloadRoot(){
     if(!window.showDirectoryPicker)throw new Error('Trình duyệt không hỗ trợ chọn thư mục. Hãy dùng Chrome hoặc Edge phiên bản mới.')
     try{const directory=await window.showDirectoryPicker({mode:'readwrite'});rememberedDownloadRoot=directory;setDownloadRoot(directory);return directory}catch(error){if(error instanceof DOMException&&error.name==='AbortError')return null;throw error}
+  }
+  function buildUniqueFileName(desiredName:string, usedNames:Set<string>){
+    const dot=desiredName.lastIndexOf('.')
+    const stem=dot>0?desiredName.slice(0,dot):desiredName
+    const suffix=dot>0?desiredName.slice(dot):''
+    let fileName=desiredName
+    let counter=2
+    while(usedNames.has(fileName.toLocaleLowerCase())){
+      fileName=`${stem}-${counter++}${suffix}`
+    }
+    usedNames.add(fileName.toLocaleLowerCase())
+    return fileName
+  }
+  async function writeStreamToFile(directory:FileSystemDirectoryHandle,fileName:string,assetId:string){
+    const response=await fetch(streamUrl(assetId),{cache:'no-store'});if(!response.ok)throw new Error(`Không tải được ${fileName}`)
+    const buffer=await response.arrayBuffer();
+    if(!buffer.byteLength)throw new Error(`File tải về rỗng: ${fileName}`)
+    const fileHandle=await directory.getFileHandle(fileName,{create:true})
+    const writable=await fileHandle.createWritable()
+    try{
+      await writable.write(new Uint8Array(buffer))
+      await writable.close()
+    }catch(error){
+      await writable.close().catch(()=>{})
+      try{await directory.removeEntry(fileName)}catch{}
+      throw error
+    }
   }
   async function downloadOutputs(folder:string,items:Asset[],downloadWholeFolder=false){
     const selected=downloadWholeFolder?items:items.filter(item=>selectedOutputIds.includes(item.id)); if(!selected.length)return
@@ -1699,13 +1925,13 @@ function JobsPanel({ jobs, outputs, refresh, guarded }: { jobs:Job[]; outputs:As
         const root=downloadRoot||await chooseDownloadRoot();if(!root)return
         const safeFolderName=folder.replace(/[<>:"/\\|?*\x00-\x1F]/g,'-').replace(/[. ]+$/g,'').trim()||'output'
         const directory=await root.getDirectoryHandle(safeFolderName,{create:true})
+        const usedNames=new Set<string>()
         let cursor=0;let completed=0
         const worker=async()=>{while(true){
           const index=cursor++;if(index>=selected.length)return
           const item=selected[index]
-          const response=await fetch(streamUrl(item.id));if(!response.ok)throw new Error(`Không tải được ${item.display_name}`)
-          const fileHandle=await directory.getFileHandle(item.display_name,{create:true});const writable=await fileHandle.createWritable()
-          try{await writable.write(await response.blob())}finally{await writable.close()}
+          const fileName=buildUniqueFileName(item.display_name,usedNames)
+          await writeStreamToFile(directory,fileName,item.id)
           completed++;setDownloadProgress(`${completed}/${selected.length}`)
         }}
         await Promise.all(Array.from({length:Math.min(3,selected.length)},worker))
@@ -1728,9 +1954,7 @@ function JobsPanel({ jobs, outputs, refresh, guarded }: { jobs:Job[]; outputs:As
           let fileName=original;let counter=2
           while(usedNames.has(fileName.toLocaleLowerCase()))fileName=`${stem}-${counter++}${suffix}`
           usedNames.add(fileName.toLocaleLowerCase())
-          const response=await fetch(streamUrl(item.id));if(!response.ok)throw new Error(`Không tải được ${item.display_name}`)
-          const fileHandle=await directory.getFileHandle(fileName,{create:true});const writable=await fileHandle.createWritable()
-          try{await writable.write(await response.blob())}finally{await writable.close()}
+          await writeStreamToFile(directory,fileName,item.id)
           completed++;setDownloadProgress(`${completed}/${outputs.length}`)
         }}
         await Promise.all(Array.from({length:Math.min(3,outputs.length)},worker))
@@ -1738,7 +1962,7 @@ function JobsPanel({ jobs, outputs, refresh, guarded }: { jobs:Job[]; outputs:As
     })
   }
   return <section><div className="section-title"><div><h2>Công việc & kết quả</h2><p>Tối đa 3 job media chạy đồng thời; TTS được khóa riêng để an toàn GPU.</p></div><div className="download-root-picker"><span>{downloadRoot?`Thư mục lưu: ${downloadRoot.name}`:'Chưa chọn thư mục lưu'}</span><button className="secondary" onClick={()=>guarded(async()=>{await chooseDownloadRoot()})}><FolderOpen size={15}/>{downloadRoot?'Đổi thư mục lưu':'Chọn thư mục lưu'}</button></div></div><div className="results-layout"><div className="results-videos"><div className="all-output-actions"><button className="primary download-all-batches" disabled={!outputs.length||downloading} onClick={downloadAllOutputs}><Download size={15}/>{downloading?`Đang tải ${downloadProgress}`:`Tải toàn bộ ${outputGroups.length} batch (${outputs.length} video)`}</button><div className="bulk-rename-all"><input value={allOutputsName} onChange={e=>setAllOutputsName(e.target.value)} placeholder="Tên mới cho toàn bộ video"/><button className="secondary" disabled={!allOutputsName.trim()||!outputs.length} onClick={renameAllOutputs}>Đổi tên toàn bộ file</button></div></div><div className="grid-density-toolbar"><span>Kích thước lưới</span><div className="segmented">{([['large','Lớn'],['compact','Gọn'],['small','Nhỏ']] as const).map(([value,label])=><button key={value} className={gridDensity===value?'active':''} onClick={()=>setGridDensity(value)}>{label}</button>)}</div></div>
-    {outputGroups.map(([folder,items])=>{const selectedCount=items.filter(item=>selectedOutputIds.includes(item.id)).length;const selecting=selectingFolder===folder;return <div key={folder} className="output-group"><div className="output-group-heading"><h2>{folder} <span className="count">{items.length}</span></h2><div className="output-download-actions"><button className={selecting?'primary':'secondary'} onClick={()=>{setSelectingFolder(selecting?null:folder);if(!selecting)setSelectedOutputIds(old=>old.filter(id=>!items.some(item=>item.id===id)))}}><Download size={15}/>{selecting?'Xong chọn': 'Chọn video để tải'}</button>{selecting&&<button className="secondary" onClick={()=>toggleOutputGroup(items)}>{selectedCount===items.length?'Bỏ chọn tất cả':'Chọn tất cả'}</button>}{selecting&&<button className="secondary" disabled={!selectedCount||downloading} onClick={()=>downloadOutputs(folder,items)}>{downloading?`Đang tải ${downloadProgress}`:`Tải ${selectedCount} đã chọn`}</button>}<button className="primary" disabled={downloading} onClick={()=>downloadOutputs(folder,items,true)}>{downloading?`Đang tải ${downloadProgress}`:`Tải cả thư mục (${items.length})`}</button></div><div className="bulk-rename"><input value={renameNames[folder]||''} onChange={e=>setRenameNames(old=>({...old,[folder]:e.target.value}))} placeholder="Tên mới, ví dụ: gocdoxinh"/><button className="secondary" disabled={!renameNames[folder]?.trim()} onClick={()=>renameGroup(folder,items)}>Đổi tên tất cả</button></div></div>{selecting&&<p className="selection-hint">Đang chọn tải: click vào từng video · đã chọn {selectedCount}/{items.length} · file sẽ lưu trong thư mục con {folder}</p>}<p className="rename-preview">Kết quả: {renameNames[folder]?.trim()||'ten-file'}-1.mp4, {renameNames[folder]?.trim()||'ten-file'}-2.mp4, …</p><div className={`output-grid density-${gridDensity}${selecting?' selecting':''}`}>{items.map(o=><article className={selectedOutputIds.includes(o.id)?'output-selected':''} key={o.id} onClick={()=>{if(selecting)setSelectedOutputIds(old=>old.includes(o.id)?old.filter(id=>id!==o.id):[...old,o.id])}}><div className="output-checkmark">{selectedOutputIds.includes(o.id)?'✓':''}</div><video controls={!selecting} src={streamUrl(o.id)} preload="metadata"/><strong>{o.display_name}</strong><span>{formatDuration(o.duration_ms)} · {o.width}×{o.height}</span></article>)}</div></div>})}
+    {outputGroups.map(([folder,items])=>{const selectedCount=items.filter(item=>selectedOutputIds.includes(item.id)).length;const selecting=selectingFolder===folder;return <div key={folder} className="output-group"><div className="output-group-heading"><h2>{folder} <span className="count">{items.length}</span></h2><div className="output-download-actions"><button className={selecting?'primary':'secondary'} onClick={()=>{setSelectingFolder(selecting?null:folder);if(!selecting)setSelectedOutputIds(old=>old.filter(id=>!items.some(item=>item.id===id)))}}><Download size={15}/>{selecting?'Xong chọn': 'Chọn video để tải'}</button>{selecting&&<button className="secondary" onClick={()=>toggleOutputGroup(items)}>{selectedCount===items.length?'Bỏ chọn tất cả':'Chọn tất cả'}</button>}{selecting&&<button className="secondary" disabled={!selectedCount||downloading} onClick={()=>downloadOutputs(folder,items)}>{downloading?`Đang tải ${downloadProgress}`:`Tải ${selectedCount} đã chọn`}</button>}<button className="primary" disabled={downloading} onClick={()=>downloadOutputs(folder,items,true)}>{downloading?`Đang tải ${downloadProgress}`:`Tải cả thư mục (${items.length})`}</button></div><div className="bulk-rename"><input value={renameNames[folder]||''} onChange={e=>setRenameNames(old=>({...old,[folder]:e.target.value}))} placeholder="Tên mới, ví dụ: gocdoxinh"/><button className="secondary" disabled={!renameNames[folder]?.trim()} onClick={()=>renameGroup(folder,items)}>Đổi tên tất cả</button></div></div>{selecting&&<p className="selection-hint">Đang chọn tải: click vào từng video · đã chọn {selectedCount}/{items.length} · file sẽ lưu trong thư mục con {folder}</p>}<p className="rename-preview">Kết quả: {renameNames[folder]?.trim()||'ten-file'}-1.mp4, {renameNames[folder]?.trim()||'ten-file'}-2.mp4, …</p><div className={`output-grid density-${gridDensity}${selecting?' selecting':''}`}>{items.map(o=>{const selected=selectedOutputIds.includes(o.id);const editing=editingOutputId===o.id;return <article className={selected?'output-selected':''} key={o.id} onClick={e=>{if((e.target as HTMLElement).closest('video,button,input'))return;if(selecting)setSelectedOutputIds(old=>old.includes(o.id)?old.filter(id=>id!==o.id):[...old,o.id]);else setSelectedOutputIds([o.id])}}><div className="output-checkmark">{selected?'✓':''}</div><video controls={!selecting} src={streamUrl(o.id)} preload="none"/><div className="output-file-name">{editing?<input ref={outputNameInputRef} value={editingOutputName} onChange={e=>setEditingOutputName(e.target.value)} onBlur={()=>setEditingOutputId(null)} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();void saveSingleOutputName(o)}else if(e.key==='Escape')setEditingOutputId(null)}}/>:<strong>{o.display_name}</strong>}{selected&&!editing&&<button type="button" title="Đổi tên (F2)" onClick={e=>{e.stopPropagation();startRenameOutput(o)}}><Pencil size={12}/></button>}</div><span>{formatDuration(o.duration_ms)} · {o.width}×{o.height}</span></article>})}</div></div>})}
 </div><aside className="jobs-sidebar"><h3>Đang chạy & 3 batch gần nhất</h3><div className="job-list">{visibleJobs.map(job=><article className="job" key={job.id}><div className={`job-status ${job.status}`}>{job.status==='completed'?<CheckCircle2/>:job.status==='failed'?<XCircle/>:<LoaderCircle className={['running','rendering','processing'].includes(job.status)?'spin':''}/>}</div><div className="job-body"><div><strong>{job.kind==='tts'?'Tạo giọng':job.kind==='audio_process'?'Chỉnh audio':'Render video'}</strong><span>{formatDateTime(job.created_at)} · {job.status} · {Math.round(job.progress)}%</span></div><div className="progress"><i style={{width:`${job.progress}%`}}/></div>{job.error_message&&<p className="job-error">{job.error_message}</p>}</div><div className="job-actions">{['queued','running','rendering','processing'].includes(job.status)&&<button onClick={()=>action(job,'cancel')}>Hủy</button>}{['failed','cancelled'].includes(job.status)&&<button onClick={()=>action(job,'retry')}>Thử lại</button>}</div></article>)}</div></aside></div>
   </section>
 }

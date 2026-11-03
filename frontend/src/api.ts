@@ -21,5 +21,6 @@ export const jsonOptions = (method: string, body: unknown): RequestInit => ({
 })
 
 export const streamUrl = (assetId: string) => `${API}/assets/${assetId}/stream`
+export const downloadUrl = (assetId: string) => `${API}/assets/${assetId}/download`
 export const thumbnailUrl = (assetId: string) => `${API}/assets/${assetId}/thumbnail`
 export const bgmStreamUrl = (trackId: string) => `${API}/bgm/${trackId}/stream`

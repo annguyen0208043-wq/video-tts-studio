@@ -18,6 +18,7 @@ class TTSService:
         self._engine = None
         self._device = None
         self._lock = threading.Lock()
+        self._preload_thread: threading.Thread | None = None
 
     def _load(self, device: str):
         normalized = device.lower()
@@ -25,7 +26,11 @@ class TTSService:
             raise ValueError("Device phải là auto, cuda hoặc cpu")
         backend = "onnx" if normalized == "cpu" else None
         with self._lock:
-            if self._engine is not None and self._device == normalized:
+            # `auto` and `cuda` both use the PyTorch backend. Treat them as the
+            # same loaded engine so a UI request for CUDA does not reload a
+            # model that startup already preloaded with `TTS_DEVICE=auto`.
+            same_backend = (self._device == "cpu") == (normalized == "cpu")
+            if self._engine is not None and same_backend:
                 return self._engine
             src = settings.vieneu_repo / "src"
             if not src.exists():
@@ -98,6 +103,28 @@ class TTSService:
                 raise RuntimeError(result.stderr.strip() or "Không chuyển đổi được audio")
         finally:
             temporary_wav.unlink(missing_ok=True)
+
+    def preload(self, device: str = "auto") -> None:
+        """Load the model in the background so the first TTS job does not pay startup cost."""
+        try:
+            logger.info("Preloading VieNeu engine device=%s", device)
+            self._load(device)
+            logger.info("VieNeu engine preload completed")
+        except Exception:
+            # Keep the API available. A later TTS job will retry and expose the
+            # concrete error through the normal job status.
+            logger.exception("VieNeu engine preload failed")
+
+    def preload_async(self, device: str = "auto") -> None:
+        if self.loaded or (self._preload_thread and self._preload_thread.is_alive()):
+            return
+        self._preload_thread = threading.Thread(
+            target=self.preload,
+            args=(device,),
+            name="tts-preload",
+            daemon=True,
+        )
+        self._preload_thread.start()
 
     @property
     def loaded(self) -> bool:

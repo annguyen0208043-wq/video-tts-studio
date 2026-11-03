@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from openpyxl import load_workbook
@@ -13,13 +13,30 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal, get_db
-from app.models import Asset, Job, Project, Sequence
+from app.models import Asset, BgmTrack, Job, Project, Sequence
 from app.schemas.api import AudioBatchProcessCreate, AudioProcessJobCreate, JobOut, RenderItemCreate, RenderJobCreate, TTSJobCreate
 from app.services.job_service import job_manager
 from app.services.storage_service import safe_filename
 
 
 router = APIRouter(tags=["jobs"])
+
+BANGKOK_TIMEZONE = timezone(timedelta(hours=7))
+
+
+def _next_render_group(db: Session, project_id: str, now: datetime) -> str:
+    """Return day-index (for example 15-2), persisted independently per project."""
+    day_prefix = str(now.day)
+    pattern = re.compile(rf"^{re.escape(day_prefix)}-(\d+)$")
+    job_inputs = db.scalars(
+        select(Job.input_json).where(Job.project_id == project_id, Job.kind == "render")
+    ).all()
+    indexes: list[int] = []
+    for values in job_inputs:
+        match = pattern.fullmatch(str((values or {}).get("group_name") or ""))
+        if match:
+            indexes.append(int(match.group(1)))
+    return f"{day_prefix}-{max(indexes, default=0) + 1}"
 
 
 def _next_tts_name(db: Session, project_id: str, requested_name: str) -> str:
@@ -215,17 +232,31 @@ def create_render_jobs(project_id: str, payload: RenderJobCreate, db: Session = 
     ).all()
     if len(sequences) != len(set(sequence_ids)):
         raise HTTPException(400, "One or more sequences are invalid")
-    all_audio_ids = {item.audio_asset_id for item in render_items if item.audio_asset_id} | {
-        item.bgm_asset_id for item in render_items if item.bgm_asset_id
-    }
-    if all_audio_ids:
-        audios = db.scalars(
-            select(Asset).where(Asset.id.in_(all_audio_ids), Asset.project_id == project_id)
+    voice_asset_ids = {item.audio_asset_id for item in render_items if item.audio_asset_id}
+    if voice_asset_ids:
+        voice_assets = db.scalars(
+            select(Asset).where(Asset.id.in_(voice_asset_ids), Asset.project_id == project_id)
         ).all()
-        if len(audios) != len(all_audio_ids) or any(
-            audio.type not in {"tts_audio", "external_audio"} for audio in audios
+        if len(voice_assets) != len(voice_asset_ids) or any(
+            audio.type not in {"tts_audio", "external_audio"} for audio in voice_assets
         ):
-            raise HTTPException(400, "One or more audio assets are invalid")
+            raise HTTPException(400, "One or more voice audio assets are invalid")
+
+    bgm_asset_ids = {item.bgm_asset_id for item in render_items if item.bgm_asset_id}
+    if bgm_asset_ids:
+        project_bgm_assets = db.scalars(
+            select(Asset).where(Asset.id.in_(bgm_asset_ids), Asset.project_id == project_id)
+        ).all()
+        global_bgm_tracks = db.scalars(
+            select(BgmTrack).where(BgmTrack.id.in_(bgm_asset_ids))
+        ).all()
+        valid_bgm_ids = {
+            audio.id
+            for audio in project_bgm_assets
+            if audio.type in {"tts_audio", "external_audio"}
+        } | {track.id for track in global_bgm_tracks}
+        if valid_bgm_ids != bgm_asset_ids:
+            raise HTTPException(400, "One or more background music tracks are invalid")
 
     values = payload.model_dump()
     option_keys = {
@@ -240,24 +271,16 @@ def create_render_jobs(project_id: str, payload: RenderJobCreate, db: Session = 
         "bgm_volume",
     }
     base_options = {key: values[key] for key in option_keys}
-    now = datetime.now()
-    # One stable timestamp per click, shared by every output in this run.
-    # Keep the compact format requested by the UI, e.g. 26-9-26-10-1-1.
-    timestamp = f"{now.day}-{now.month}-{now.strftime('%y')}-{now.hour}-{now.minute}-{now.second}"
-    group_name = payload.group_name.strip()
-    if not group_name:
-        raise HTTPException(400, "Tên nhóm render không được để trống")
+    now = datetime.now(BANGKOK_TIMEZONE)
+    group_name = _next_render_group(db, project_id, now)
     output_root = safe_filename(payload.output_folder, "renders")
     # One click creates one named output group, even when source batches differ.
-    run_folder = f"{output_root}/{timestamp}-{safe_filename(group_name, 'nhom-render')}"
+    run_folder = f"{output_root}/{group_name}"
     sequence_map = {sequence.id: sequence for sequence in sequences}
-    batch_indexes: dict[str, int] = {}
     jobs: list[Job] = []
-    for item in render_items:
+    for output_index, item in enumerate(render_items, start=1):
         sequence = sequence_map[item.sequence_id]
         batch_name = sequence.batch_name or "Batch"
-        batch_indexes[batch_name] = batch_indexes.get(batch_name, 0) + 1
-        output_index = batch_indexes[batch_name]
         options = dict(base_options)
         options["source_audio_policy"] = item.source_audio_policy
         options["voice_volume"] = item.voice_volume
@@ -270,14 +293,12 @@ def create_render_jobs(project_id: str, payload: RenderJobCreate, db: Session = 
                 "sequence_id": item.sequence_id,
                 "audio_asset_id": item.audio_asset_id,
                 "bgm_asset_id": item.bgm_asset_id,
-                "custom_name": payload.run_name,
-                "output_filename": (
-                    f"{timestamp}-{safe_filename(payload.run_name, 'output')}-{output_index}.mp4"
-                ),
+                "custom_name": group_name,
+                "output_filename": f"{group_name}-v{output_index}.mp4",
                 "output_index": output_index,
                 "batch_name": batch_name,
                 "group_name": group_name,
-                "run_timestamp": timestamp,
+                "run_timestamp": group_name,
                 "run_folder": run_folder,
                 "options": options,
             },

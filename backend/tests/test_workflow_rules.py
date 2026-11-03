@@ -1,5 +1,6 @@
 import io
 import json
+import re
 
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
@@ -51,7 +52,14 @@ def test_render_requires_explicit_audio_exceptions(monkeypatch):
         assert client.post(endpoint, json=duplicate).status_code == 400
         allowed = client.post(endpoint, json={**duplicate, 'allow_duplicate_audio': True})
         assert allowed.status_code == 202
-        options = allowed.json()[0]['input_json']['options']
+        created = allowed.json()
+        options = created[0]['input_json']['options']
         assert options['video_encoder'] == 'h264_nvenc'
         assert options['source_audio_policy'] == 'mute'
         assert options['bgm_volume'] == options['voice_volume'] == 1.0
+        group_name = created[0]['input_json']['group_name']
+        assert re.fullmatch(r'\d{1,2}-\d+', group_name)
+        assert [job['input_json']['output_filename'] for job in created] == [
+            f'{group_name}-v1.mp4',
+            f'{group_name}-v2.mp4',
+        ]

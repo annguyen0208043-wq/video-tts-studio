@@ -70,7 +70,7 @@ def test_project_media_sequence_and_real_render(tmp_path: Path):
             f"/api/projects/{project_id}/sequences/generate",
             json={
                 "video_asset_ids": [item["id"] for item in assets],
-                "mode": "product_with_repetition",
+                "mode": "pair_both_orders",
                 "length": 2,
                 "limit": 100,
                 "batch_name": "Tui xach loai 1",
@@ -78,7 +78,7 @@ def test_project_media_sequence_and_real_render(tmp_path: Path):
         )
         assert generated.status_code == 201, generated.text
         sequences = generated.json()
-        assert {item["name"] for item in sequences} == {"A-A", "A-B", "B-A", "B-B"}
+        assert {item["name"] for item in sequences} == {"A-B", "B-A"}
         assert {item["batch_name"] for item in sequences} == {"Tui xach loai 1"}
 
         render = client.post(

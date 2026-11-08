@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from uuid import uuid4
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
@@ -81,28 +82,27 @@ def probe(path: Path) -> dict:
 
 def create_thumbnail(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            "0.2",
-            "-i",
-            str(source),
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale=480:-2",
-            str(destination),
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if proc.returncode != 0:
-        raise ValueError(proc.stderr.strip() or "Không tạo được thumbnail")
+    temporary = destination.with_name(f".{destination.stem}.{uuid4().hex}.jpg")
+    diagnostics = ""
+    try:
+        # Pick a representative frame, avoiding an empty opening frame. Very
+        # short videos may end before 0.2 s, so retry from the beginning.
+        for offset in ("0.2", "0"):
+            proc = subprocess.run(
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", offset,
+                 "-i", str(source), "-an", "-frames:v", "1", "-vf",
+                 "thumbnail=30,scale=360:640:force_original_aspect_ratio=decrease,setsar=1",
+                 "-q:v", "3", str(temporary)],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if proc.returncode == 0 and temporary.is_file() and temporary.stat().st_size:
+                temporary.replace(destination)
+                return
+            diagnostics = proc.stderr.strip()
+        raise ValueError(diagnostics or "Không tạo được thumbnail")
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Tạo ảnh đại diện video quá thời gian chờ") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
 

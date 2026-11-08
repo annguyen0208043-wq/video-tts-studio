@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from contextlib import closing
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from openpyxl import load_workbook
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from starlette.concurrency import run_in_threadpool
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal, get_db
@@ -26,14 +28,15 @@ BANGKOK_TIMEZONE = timezone(timedelta(hours=7))
 
 def _next_render_group(db: Session, project_id: str, now: datetime) -> str:
     """Return day-index (for example 15-2), persisted independently per project."""
+    db.execute(select(Project.id).where(Project.id == project_id).with_for_update())
     day_prefix = str(now.day)
     pattern = re.compile(rf"^{re.escape(day_prefix)}-(\d+)$")
-    job_inputs = db.scalars(
-        select(Job.input_json).where(Job.project_id == project_id, Job.kind == "render")
+    job_groups = db.scalars(
+        select(Job.input_json["group_name"].as_string()).where(Job.project_id == project_id, Job.kind == "render")
     ).all()
     indexes: list[int] = []
-    for values in job_inputs:
-        match = pattern.fullmatch(str((values or {}).get("group_name") or ""))
+    for group in job_groups:
+        match = pattern.fullmatch(str(group or ""))
         if match:
             indexes.append(int(match.group(1)))
     return f"{day_prefix}-{max(indexes, default=0) + 1}"
@@ -41,39 +44,46 @@ def _next_render_group(db: Session, project_id: str, now: datetime) -> str:
 
 def _next_tts_name(db: Session, project_id: str, requested_name: str) -> str:
     """Append a persistent, project-wide sequence number to a user supplied prefix."""
+    # Serialise name allocation on PostgreSQL when several clicks arrive
+    # together; keep the lock only until the new queued jobs are committed.
+    db.execute(select(Project.id).where(Project.id == project_id).with_for_update())
     prefix = safe_filename(requested_name, "voice")
     pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)$")
-    job_inputs = db.scalars(select(Job.input_json).where(Job.project_id == project_id, Job.kind == "tts")).all()
+    names = db.scalars(select(Job.input_json["name"].as_string()).where(Job.project_id == project_id, Job.kind == "tts")).all()
     used = []
-    for input_json in job_inputs:
-        match = pattern.match(str(input_json.get("name", "")))
+    for name in names:
+        match = pattern.match(str(name or ""))
         if match:
             used.append(int(match.group(1)))
     return f"{prefix}_{max(used, default=0) + 1}"
 
 
-def _queue_tts_jobs(db: Session, project_id: str, payloads: list[dict]) -> list[Job]:
+def _submit_jobs(jobs: list[tuple[str, str]]) -> None:
+    for job_id, kind in jobs:
+        job_manager.submit(job_id, kind=kind)
+
+
+def _queue_tts_jobs(db: Session, project_id: str, payloads: list[dict], background_tasks: BackgroundTasks) -> list[Job]:
     jobs = [Job(project_id=project_id, kind="tts", status="queued", input_json=item) for item in payloads]
     db.add_all(jobs)
     db.commit()
-    for job in jobs:
-        db.refresh(job)
-        job_manager.submit(job.id)
+    background_tasks.add_task(_submit_jobs, [(job.id, job.kind) for job in jobs])
     return jobs
 
 
 @router.post("/projects/{project_id}/tts/jobs", response_model=JobOut, status_code=202)
-def create_tts_job(project_id: str, payload: TTSJobCreate, db: Session = Depends(get_db)):
+def create_tts_job(project_id: str, payload: TTSJobCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     if not db.get(Project, project_id):
         raise HTTPException(404, "Project was not found")
     values = payload.model_dump()
     values["name"] = _next_tts_name(db, project_id, payload.name)
-    return _queue_tts_jobs(db, project_id, [values])[0]
+    return _queue_tts_jobs(db, project_id, [values], background_tasks)[0]
 
 
 @router.post("/projects/{project_id}/tts/excel-jobs", response_model=list[JobOut], status_code=202)
-async def create_tts_excel_jobs(
+def create_tts_excel_jobs(
     project_id: str,
+    background_tasks: BackgroundTasks,
     settings: str = Form(...),
     upload: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -89,19 +99,28 @@ async def create_tts_excel_jobs(
     group_name = (base_payload.group_name or "").strip()
     if not group_name:
         raise HTTPException(422, "Hãy đặt tên nhóm audio trước khi nhập Excel")
-    existing_groups = [item.get("group_name") for item in db.scalars(select(Job.input_json).where(Job.project_id == project_id, Job.kind == "tts")).all()]
-    existing_groups += [item.get("group_name") for item in db.scalars(select(Asset.metadata_json).where(Asset.project_id == project_id)).all()]
+    existing_groups = db.scalars(select(Job.input_json["group_name"].as_string()).where(Job.project_id == project_id, Job.kind == "tts")).all()
+    existing_groups += db.scalars(select(Asset.metadata_json["group_name"].as_string()).where(Asset.project_id == project_id)).all()
     if group_name.casefold() in {str(name).strip().casefold() for name in existing_groups if name}:
         raise HTTPException(409, "Tên nhóm đã được sử dụng. Hãy chọn tên nhóm mới.")
     base_payload.group_name = group_name
-    content = await upload.read()
+    # Excel parsing and the synchronous DB session belong in FastAPI's worker
+    # pool, otherwise a large workbook stalls every request and event stream.
+    content = upload.file.read(10 * 1024 * 1024 + 1)
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(413, "File Excel không được vượt quá 10 MB")
     try:
-        workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
-        sheet = workbook.active
-        rows = list(sheet.iter_rows(values_only=True))
-        workbook.close()
+        with closing(load_workbook(BytesIO(content), read_only=True, data_only=True)) as workbook:
+            sheet = workbook.active
+            # Bound rows and columns while reading, rather than loading an
+            # entire worksheet before enforcing the 1000-entry limit.
+            rows = []
+            for row in sheet.iter_rows(values_only=True, max_col=2):
+                rows.append(row)
+                if len(rows) > 1001:
+                    raise HTTPException(400, "Mỗi lần chỉ được nhập tối đa 1000 đoạn")
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(400, "Không thể đọc file Excel") from exc
     if not rows or len(rows[0]) < 2:
@@ -140,12 +159,12 @@ async def create_tts_excel_jobs(
         item = base_payload.model_dump()
         item.update(text=value, name=f"{prefix}_{first_index + offset}", source_stt=number)
         payloads.append(item)
-    return _queue_tts_jobs(db, project_id, payloads)
+    return _queue_tts_jobs(db, project_id, payloads, background_tasks)
 
 
 @router.post("/assets/{asset_id}/audio/jobs", response_model=JobOut, status_code=202)
 def create_audio_process_job(
-    asset_id: str, payload: AudioProcessJobCreate, db: Session = Depends(get_db)
+    asset_id: str, payload: AudioProcessJobCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)
 ):
     asset = db.get(Asset, asset_id)
     if not asset or asset.type not in {"tts_audio", "external_audio"}:
@@ -163,13 +182,13 @@ def create_audio_process_job(
     db.add(job)
     db.commit()
     db.refresh(job)
-    job_manager.submit(job.id)
+    background_tasks.add_task(_submit_jobs, [(job.id, job.kind)])
     return job
 
 
 @router.post("/projects/{project_id}/audio/batch-jobs", response_model=list[JobOut], status_code=202)
 def create_audio_batch_jobs(
-    project_id: str, payload: AudioBatchProcessCreate, db: Session = Depends(get_db)
+    project_id: str, payload: AudioBatchProcessCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)
 ):
     assets = db.scalars(
         select(Asset).where(Asset.id.in_(payload.asset_ids), Asset.project_id == project_id)
@@ -200,14 +219,12 @@ def create_audio_batch_jobs(
         db.add(job)
         jobs.append(job)
     db.commit()
-    for job in jobs:
-        db.refresh(job)
-        job_manager.submit(job.id)
+    background_tasks.add_task(_submit_jobs, [(job.id, job.kind) for job in jobs])
     return jobs
 
 
 @router.post("/projects/{project_id}/render/jobs", response_model=list[JobOut], status_code=202)
-def create_render_jobs(project_id: str, payload: RenderJobCreate, db: Session = Depends(get_db)):
+def create_render_jobs(project_id: str, payload: RenderJobCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project was not found")
@@ -306,9 +323,7 @@ def create_render_jobs(project_id: str, payload: RenderJobCreate, db: Session = 
         db.add(job)
         jobs.append(job)
     db.commit()
-    for job in jobs:
-        db.refresh(job)
-        job_manager.submit(job.id)
+    background_tasks.add_task(_submit_jobs, [(job.id, job.kind) for job in jobs])
     return jobs
 
 
@@ -321,7 +336,11 @@ def list_jobs(
     statement = select(Job)
     if project_id:
         statement = statement.where(Job.project_id == project_id)
-    return db.scalars(statement.order_by(Job.created_at.desc()).limit(limit)).all()
+    recent = statement.order_by(Job.created_at.desc()).limit(limit).with_only_columns(Job.id)
+    # Keep older queued/running jobs visible even after a 1000-row Excel import.
+    return db.scalars(statement.where(or_(
+        Job.id.in_(recent), Job.status.in_({"queued", "running", "rendering", "processing"})
+    )).order_by(Job.created_at.desc())).all()
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut)
@@ -339,16 +358,16 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Job was not found")
     if job.status in {"completed", "failed", "cancelled"}:
         return job
-    if job_manager.cancel(job_id):
-        job.status = "cancelled"
-        job.error_message = "Cancelled by the user"
-        db.commit()
-        db.refresh(job)
+    job_manager.cancel(job_id)
+    job.status = "cancelled"
+    job.error_message = "Cancelled by the user"
+    db.commit()
+    db.refresh(job)
     return job
 
 
 @router.post("/jobs/{job_id}/retry", response_model=JobOut, status_code=202)
-def retry_job(job_id: str, db: Session = Depends(get_db)):
+def retry_job(job_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     original = db.get(Job, job_id)
     if not original:
         raise HTTPException(404, "Job was not found")
@@ -363,32 +382,28 @@ def retry_job(job_id: str, db: Session = Depends(get_db)):
     db.add(retry)
     db.commit()
     db.refresh(retry)
-    job_manager.submit(retry.id)
+    background_tasks.add_task(_submit_jobs, [(retry.id, retry.kind)])
     return retry
 
 
 @router.get("/events")
 async def events(project_id: str):
+    def snapshot() -> str:
+        with SessionLocal() as db:
+            # Recently changed jobs must stay in the stream after completion,
+            # even when 1000 newer queued jobs were imported in one batch.
+            recent = select(Job.id).where(Job.project_id == project_id).order_by(Job.updated_at.desc(), Job.created_at.desc()).limit(100)
+            rows = db.execute(select(
+                Job.id, Job.status, Job.progress, Job.error_message, Job.output_asset_id,
+            ).where(Job.project_id == project_id, or_(
+                Job.id.in_(recent), Job.status.in_({"queued", "running", "rendering", "processing"})
+            )).order_by(Job.created_at.desc())).mappings().all()
+            return json.dumps([dict(row) for row in rows], ensure_ascii=False)
+
     async def stream():
         previous = ""
         while True:
-            with SessionLocal() as db:
-                jobs = db.scalars(
-                    select(Job).where(Job.project_id == project_id).order_by(Job.created_at.desc()).limit(100)
-                ).all()
-                payload = json.dumps(
-                    [
-                        {
-                            "id": job.id,
-                            "status": job.status,
-                            "progress": job.progress,
-                            "error_message": job.error_message,
-                            "output_asset_id": job.output_asset_id,
-                        }
-                        for job in jobs
-                    ],
-                    ensure_ascii=False,
-                )
+            payload = await run_in_threadpool(snapshot)
             if payload != previous:
                 yield f"event: jobs\ndata: {payload}\n\n"
                 previous = payload

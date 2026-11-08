@@ -8,13 +8,21 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services import voice_library
+from app.services import voice_store
 from app.services.tts_service import TTSService, tts_service
+from app.models import VoiceEntry
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 
 @pytest.fixture
 def library(tmp_path, monkeypatch):
     monkeypatch.setattr(voice_library, "settings", SimpleNamespace(data_dir=tmp_path))
-    return tmp_path / "voices"
+    engine = create_engine(f"sqlite:///{(tmp_path / 'voices.db').as_posix()}")
+    VoiceEntry.__table__.create(engine)
+    monkeypatch.setattr(voice_store, "SessionLocal", sessionmaker(bind=engine, expire_on_commit=False))
+    yield tmp_path / "voices"
+    engine.dispose()
 
 
 def test_clone_survives_service_restart_and_does_not_modify_presets(library, tmp_path, monkeypatch):
@@ -36,7 +44,8 @@ def test_clone_survives_service_restart_and_does_not_modify_presets(library, tmp
     item = voice_library.clone_voice("Giọng của tôi", source, "cpu")
     assert item["custom"] is True
     assert calls == [(item["id"], False), (item["id"], "removed")]
-    assert (library / f"{item['id']}.wav").exists()
+    with voice_store.SessionLocal() as db:
+        assert db.get(VoiceEntry, item["id"]).reference_audio
     assert voice_library.custom_voices() == [item]
     preset = voice_library.resolve_voice(item["id"])
     assert np.allclose(preset["speaker_emb"], [0.1, 0.2])
@@ -107,13 +116,13 @@ def test_startup_prepares_all_samples_and_reuses_them_across_devices(library, mo
     assert voice_library.preview_voice("one", "cpu")["audio_url"] == voice_library.preview_url("one")
 
 
-def test_model_preload_also_prepares_listening_samples(monkeypatch):
+def test_model_preload_does_not_generate_listening_samples(monkeypatch):
     service = TTSService()
     calls = []
     monkeypatch.setattr(service, "_load", lambda device: calls.append(("model", device)))
     monkeypatch.setattr(voice_library, "prepare_previews", lambda device: calls.append(("previews", device)))
     service.preload("cuda")
-    assert calls == [("model", "cuda"), ("previews", "cuda")]
+    assert calls == [("model", "cuda")]
 
 
 def test_rename_keeps_voice_data_id_and_preview(library):
@@ -130,7 +139,7 @@ def test_rename_keeps_voice_data_id_and_preview(library):
     assert response.status_code == 200
     assert response.json()['id'] == voice_id
     assert response.json()['label'] == 'Giọng clone · Giọng mình · Review'
-    stored = json.loads(manifest.read_text(encoding='utf-8'))
+    stored = voice_store.definition(voice_id)['payload']
     assert stored['name'] == 'Giọng mình · Review'
     assert stored['voice'] == payload['voice']
     assert stored['duration'] == payload['duration']
@@ -139,3 +148,42 @@ def test_rename_keeps_voice_data_id_and_preview(library):
     assert client.patch(f'/api/system/tts/voices/{voice_id}', json={'name': '   '}).status_code == 400
     assert client.patch('/api/system/tts/voices/builtin', json={'name': 'New'}).status_code == 400
     assert client.patch('/api/system/tts/voices/clone_' + 'b' * 32, json={'name': 'New'}).status_code == 404
+
+
+def test_preview_survives_deleted_disk_cache_and_never_regenerates(library, monkeypatch):
+    monkeypatch.setattr(tts_service, "voices", lambda device: [{"id": "sample", "label": "Sample"}])
+    calls = []
+    def generate(text, voice, destination, device, **kwargs):
+        calls.append(voice)
+        sf.write(destination, np.zeros(4800), 48000)
+    monkeypatch.setattr(tts_service, "generate", generate)
+    first = voice_library.preview_voice("sample", "cuda")
+    expected = voice_library.preview_path("sample").read_bytes()
+    voice_library.preview_path("sample").unlink()
+    assert voice_library.preview_voice("sample", "cpu") == first
+    assert calls == ["sample"]
+    response = TestClient(app).get(first["audio_url"])
+    assert response.status_code == 200
+    assert response.content == expected
+
+
+def test_legacy_import_is_idempotent_and_preserves_renamed_clone(library, monkeypatch):
+    library.mkdir(parents=True)
+    voice_id = "clone_" + "c" * 32
+    data = {"name": "Legacy", "voice": {"speaker_emb": [0.5], "codes": [[1, 2]]}, "duration": 4}
+    manifest = library / f"{voice_id}.json"
+    manifest.write_text(json.dumps(data), encoding="utf-8")
+    sample = voice_library.preview_path(voice_id)
+    sample.parent.mkdir()
+    sample.write_bytes(b"existing sample")
+    monkeypatch.setattr(tts_service, "generate", lambda *args, **kwargs: pytest.fail("Import must never synthesize"))
+    voice_library.sync_library()
+    assert voice_store.preview(sample.stem) == b"existing sample"
+    voice_library.rename_voice(voice_id, "Renamed in database")
+    voice_library.sync_library()
+    assert voice_store.definition(voice_id)["payload"]["name"] == "Renamed in database"
+    manifest.unlink()
+    sample.unlink()
+    voice_library.sync_library()
+    assert voice_library.resolve_voice(voice_id)["codes"].tolist() == [[1, 2]]
+    assert voice_library.preview_url(voice_id)

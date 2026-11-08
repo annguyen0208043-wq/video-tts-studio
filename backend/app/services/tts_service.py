@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import json
 import importlib.util
 import os
 import sys
@@ -62,28 +61,9 @@ class TTSService:
             return self._engine
 
     def voices(self, device: str = "auto") -> list[dict[str, str]]:
-        from app.services.voice_library import custom_voices
-        voices_file = settings.vieneu_repo / "src" / "vieneu" / "assets" / "voices_v3_turbo.json"
-        if not voices_file.exists():
-            package = importlib.util.find_spec("vieneu")
-            if package and package.origin:
-                voices_file = Path(package.origin).parent / "assets" / "voices_v3_turbo.json"
-        if voices_file.exists():
-            data = json.loads(voices_file.read_text(encoding="utf-8"))
-            presets = data.get("presets", {})
-            ordered = sorted(
-                presets.items(),
-                key=lambda item: (item[1].get("featured", 9999), item[0]),
-            )
-            return [
-                {
-                    "id": voice_id,
-                    "label": f"{'⭐ ' if info.get('featured') else ''}{voice_id} — {info.get('description', '')}",
-                }
-                for voice_id, info in ordered
-            ] + custom_voices()
-        engine = self._load(device)
-        return [{"label": label, "id": voice_id} for label, voice_id in engine.list_preset_voices()] + custom_voices()
+        from app.services.voice_library import saved_voices
+
+        return saved_voices()
 
     def generate(
         self, text: str, voice: str, destination: Path, device: str = "auto", **generation_options,
@@ -132,9 +112,6 @@ class TTSService:
             logger.info("Preloading VieNeu engine device=%s", device)
             self._load(device)
             logger.info("VieNeu engine preload completed")
-            from app.services.voice_library import prepare_previews
-
-            prepare_previews(device)
         except Exception:
             # Keep the API available. A later TTS job will retry and expose the
             # concrete error through the normal job status.

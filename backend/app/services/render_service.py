@@ -104,6 +104,7 @@ def build_ffmpeg_command(
 
     filters: list[str] = []
     concat_inputs: list[str] = []
+    keep_source_audio = options.source_audio_policy not in {"replace", "mute"}
     for index, asset in enumerate(assets):
         if options.fit_mode == "fill":
             video_filter = (
@@ -118,6 +119,9 @@ def build_ffmpeg_command(
         filters.append(
             f"[{index}:v:0]{video_filter},fps={options.fps},setsar=1,setpts=PTS-STARTPTS[v{index}]"
         )
+        if not keep_source_audio:
+            concat_inputs.append(f"[v{index}]")
+            continue
         duration = (asset.duration_ms or 1) / 1000
         if asset.has_audio:
             filters.append(
@@ -129,16 +133,15 @@ def build_ffmpeg_command(
                 f"anullsrc=r=48000:cl=stereo,atrim=duration={duration:.6f},asetpts=PTS-STARTPTS[a{index}]"
             )
         concat_inputs.append(f"[v{index}][a{index}]")
-    filters.append("".join(concat_inputs) + f"concat=n={len(assets)}:v=1:a=1[basev][basea]")
+    concat_output = ":a=1[basev][basea]" if keep_source_audio else ":a=0[basev]"
+    filters.append("".join(concat_inputs) + f"concat=n={len(assets)}:v=1" + concat_output)
 
     mix_streams: list[str] = []
 
     # 1. Original video audio
-    if options.source_audio_policy not in {"replace", "mute"}:
+    if keep_source_audio:
         filters.append(f"[basea]volume={options.source_volume}[orig]")
         mix_streams.append("[orig]")
-    else:
-        filters.append("[basea]anullsink")
 
     # 2. Voice TTS audio
     if audio_index is not None:
@@ -180,7 +183,9 @@ def build_ffmpeg_command(
         command.extend(["-preset", "p4", "-cq", "22"])
     else:
         command.extend(["-preset", "medium", "-crf", "20"])
-    command.extend(["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000"])
+    # concat uses a microsecond time base. Explicit output FPS prevents older
+    # FFmpeg builds from guessing 1,000,000 FPS for repeated short clips.
+    command.extend(["-r", str(options.fps), "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000"])
     if options.duration_policy == "shortest":
         command.append("-shortest")
     elif expected_ms:
@@ -197,9 +202,52 @@ def run_ffmpeg(
     on_progress: Callable[[float], None],
     on_process: Callable[[subprocess.Popen | None], None],
 ) -> None:
+    try:
+        _run_ffmpeg_once(command, expected_seconds, log_path, cancel_event, on_progress, on_process)
+    except RuntimeError:
+        if cancel_event.is_set():
+            raise InterruptedError("Job was cancelled") from None
+        diagnostics = log_path.read_text(encoding="utf-8", errors="replace").lower()
+        nvenc_errors = (
+            "driver does not support the required nvenc api version",
+            "cannot load nvcuda",
+            "cannot load libcuda",
+            "no nvenc capable devices found",
+            "openencodesessionex failed",
+            "no capable devices found",
+        )
+        if "-c:v" not in command or command[command.index("-c:v") + 1] != "h264_nvenc":
+            raise
+        if not any(message in diagnostics for message in nvenc_errors):
+            raise
+        fallback = command.copy()
+        fallback[fallback.index("-c:v") + 1] = "libx264"
+        fallback[fallback.index("-preset") + 1] = "medium"
+        quality_index = fallback.index("-cq")
+        fallback[quality_index:quality_index + 2] = ["-crf", "20"]
+        with log_path.open("a", encoding="utf-8") as log:
+            log.write("\nNVENC unavailable; retrying with CPU encoder libx264.\n")
+        _run_ffmpeg_once(
+            fallback, expected_seconds, log_path, cancel_event, on_progress, on_process, append_log=True
+        )
+
+
+def _run_ffmpeg_once(
+    command: list[str],
+    expected_seconds: float,
+    log_path: Path,
+    cancel_event: threading.Event,
+    on_progress: Callable[[float], None],
+    on_process: Callable[[subprocess.Popen | None], None],
+    *,
+    append_log: bool = False,
+) -> None:
+    if cancel_event.is_set():
+        raise InterruptedError("Job was cancelled")
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", encoding="utf-8") as log:
+    with log_path.open("a" if append_log else "w", encoding="utf-8") as log:
         log.write("COMMAND: " + subprocess.list2cmdline(command) + "\n\n")
+        log.flush()
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,

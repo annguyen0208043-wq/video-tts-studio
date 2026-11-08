@@ -8,8 +8,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
+from sqlalchemy import bindparam, or_, select, update
+from sqlalchemy.orm import joinedload
 
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -42,10 +42,14 @@ class JobManager:
         self.cancel_events: dict[str, threading.Event] = {}
         self.processes: dict[str, subprocess.Popen] = {}
         self.lock = threading.Lock()
+        self._pending_progress: dict[str, float] = {}
+        self._progress_thread: threading.Thread | None = None
 
     def submit(self, job_id: str, kind: str | None = None) -> None:
         event = threading.Event()
         with self.lock:
+            if job_id in self.cancel_events:
+                return
             self.cancel_events[job_id] = event
         if kind is None:
             with SessionLocal() as db:
@@ -75,22 +79,58 @@ class JobManager:
     @staticmethod
     def _update(job_id: str, **values) -> None:
         with SessionLocal() as db:
-            job = db.get(Job, job_id)
-            if job:
-                for key, value in values.items():
-                    setattr(job, key, value)
-                db.commit()
+            db.execute(update(Job).where(Job.id == job_id).values(**values))
+            db.commit()
+
+    def _report_progress(self, job_id: str, value: float) -> None:
+        # Supabase round trips must not block the FFmpeg stdout reader or TTS.
+        # Keep only the latest value per job and share a single batch writer.
+        with self.lock:
+            self._pending_progress[job_id] = min(99.0, max(0.0, value))
+            if self._progress_thread is None or not self._progress_thread.is_alive():
+                self._progress_thread = threading.Thread(target=self._flush_progress, name="job-progress", daemon=True)
+                self._progress_thread.start()
+
+    @staticmethod
+    def _write_progress_batch(progress: dict[str, float]) -> None:
+        statement = Job.__table__.update().where(
+            Job.id == bindparam("target_id"),
+            or_(Job.status == "running", Job.status == "rendering", Job.status == "processing"),
+        ).values(progress=bindparam("new_progress"))
+        with SessionLocal() as db:
+            db.execute(statement, [{"target_id": job_id, "new_progress": value} for job_id, value in progress.items()])
+            db.commit()
+
+    def _flush_progress(self) -> None:
+        while True:
+            time.sleep(0.5)
+            with self.lock:
+                if not self._pending_progress:
+                    self._progress_thread = None
+                    return
+                progress = self._pending_progress
+                self._pending_progress = {}
+            try:
+                self._write_progress_batch(progress)
+            except Exception:
+                # Progress is advisory. Final status is still committed by the
+                # worker; a temporary database issue must not fail a render.
+                logger.warning("Could not publish job progress", exc_info=True)
 
     def _execute(self, job_id: str, cancel_event: threading.Event) -> None:
-        if cancel_event.is_set():
-            return
-        self._update(job_id, status="running", progress=1)
+        started = time.monotonic()
         try:
+            if cancel_event.is_set():
+                return
+            # A cancel can arrive after the 202 response and before dispatch.
+            # Claim only queued jobs, so that durable cancellation wins.
             with SessionLocal() as db:
-                job = db.get(Job, job_id)
-                if not job:
+                kind = db.scalar(update(Job).where(
+                    Job.id == job_id, Job.status == "queued"
+                ).values(status="running", progress=1).returning(Job.kind))
+                db.commit()
+                if kind is None:
                     return
-                kind = job.kind
             if kind == "tts":
                 self._run_tts(job_id, cancel_event)
             elif kind == "audio_process":
@@ -108,6 +148,8 @@ class JobManager:
             with self.lock:
                 self.cancel_events.pop(job_id, None)
                 self.processes.pop(job_id, None)
+                self._pending_progress.pop(job_id, None)
+            logger.info("Job %s worker elapsed %.2fs (excludes queue wait)", job_id, time.monotonic() - started)
 
     def _run_tts(self, job_id: str, cancel_event: threading.Event) -> None:
         with SessionLocal() as db:
@@ -141,7 +183,7 @@ class JobManager:
                 while not progress_stop.wait(1.0):
                     elapsed = time.monotonic() - started
                     value = 8 + min(84, elapsed / estimated_seconds * 84)
-                    self._update(job_id, progress=round(value, 1))
+                    self._report_progress(job_id, round(value, 1))
 
             progress_thread = threading.Thread(target=estimate_progress, daemon=True)
             progress_thread.start()
@@ -266,7 +308,7 @@ class JobManager:
                     expected_seconds,
                     log_path,
                     cancel_event,
-                    lambda value: self._update(job_id, progress=round(value, 2)),
+                    lambda value: self._report_progress(job_id, round(value, 2)),
                     lambda proc: self._set_process(job_id, proc),
                 )
             except Exception:
@@ -304,11 +346,11 @@ class JobManager:
             job = db.get(Job, job_id)
             assert job is not None
             payload = job.input_json
-            sequence = db.scalar(
+            sequence = db.scalars(
                 select(Sequence)
                 .where(Sequence.id == payload["sequence_id"])
-                .options(selectinload(Sequence.items).selectinload(SequenceItem.asset))
-            )
+                .options(joinedload(Sequence.items).joinedload(SequenceItem.asset))
+            ).unique().first()
             if not sequence:
                 raise ValueError("Sequence was not found")
             audio = db.get(Asset, payload.get("audio_asset_id")) if payload.get("audio_asset_id") else None
@@ -320,7 +362,7 @@ class JobManager:
                     bgm = db.get(BgmTrack, bgm_id)  # fallback to global library
             root = create_project_dirs(job.project_id)
             timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
-            project = db.get(Project, job.project_id)
+            project = db.get(Project, job.project_id) if not payload.get("output_filename") else None
             custom_name = payload.get("custom_name") or (audio.display_name if audio else "original")
             filename = payload.get("output_filename") or (
                 f"{safe_filename(project.name if project else 'project', 'project')}_"
@@ -365,7 +407,7 @@ class JobManager:
                     expected_seconds,
                     log_path,
                     cancel_event,
-                    lambda value: self._update(job_id, progress=round(value, 2)),
+                    lambda value: self._report_progress(job_id, round(value, 2)),
                     lambda proc: self._set_process(job_id, proc),
                 )
             except Exception:

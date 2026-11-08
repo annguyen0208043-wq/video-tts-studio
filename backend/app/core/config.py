@@ -41,7 +41,7 @@ class Settings:
     tts_preload: bool = _env_bool("TTS_PRELOAD", True)
     max_sequence_outputs: int = int(os.getenv("MAX_SEQUENCE_OUTPUTS", "100"))
     max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "4096"))
-    max_concurrent_jobs: int = int(os.getenv("MAX_CONCURRENT_JOBS", "3"))
+    max_concurrent_jobs: int = int(os.getenv("MAX_CONCURRENT_JOBS", "4"))
     skills_dir: Path = _resolve_path(os.getenv("SKILLS_DIR", "./skills"), "./skills")
     ai_default_provider: str = os.getenv("AI_DEFAULT_PROVIDER", "auto").lower()
     ai_timeout_seconds: float = float(os.getenv("AI_TIMEOUT_SECONDS", "30"))

@@ -73,7 +73,6 @@ export function VoicePicker({ device, value, onChange }: Props) {
   useEffect(() => () => { playRequest.current++ }, [])
 
   function closeLibrary() {
-    if (cloning || savingName) return
     stopAudio(); sourceAudio.current?.pause(); setOpen(false); trigger.current?.focus()
   }
 
@@ -150,7 +149,7 @@ export function VoicePicker({ device, value, onChange }: Props) {
     {!open && error && <p className="voice-picker-error" role="alert">{error}</p>}
     {createPortal(<dialog ref={dialog} className="voice-library-dialog" aria-labelledby="voice-library-title" onCancel={event => { event.preventDefault(); closeLibrary() }} onClick={event => { if (event.target === event.currentTarget) closeLibrary() }}>
       <div className="voice-library-shell">
-        <div className="voice-library-header"><div><span className="voice-library-eyebrow">VIDEO TTS STUDIO</span><h2 id="voice-library-title">Thư viện giọng đọc</h2><p>Nghe thử, chọn giọng phù hợp hoặc tạo giọng riêng của bạn.</p></div><button type="button" className="vl-icon" aria-label="Đóng thư viện giọng" disabled={cloning || savingName} onClick={closeLibrary}><X size={21} /></button></div>
+        <div className="voice-library-header"><div><span className="voice-library-eyebrow">VIDEO TTS STUDIO</span><h2 id="voice-library-title">Thư viện giọng đọc</h2><p>Nghe thử, chọn giọng phù hợp hoặc tạo giọng riêng của bạn.</p></div><button type="button" className="vl-icon" aria-label="Đóng thư viện giọng" onClick={closeLibrary}><X size={21} /></button></div>
         <div className="voice-library-tabs" role="tablist" aria-label="Kho giọng">
           {([['preset', 'Giọng có sẵn', voices.length - mine.length], ['mine', 'Giọng của tôi', mine.length], ['clone', 'Clone giọng mới', null]] as const).map(([id, label, count]) => <button type="button" role="tab" aria-selected={tab === id} aria-controls="voice-library-content" id={`voice-tab-${id}`} key={id} disabled={cloning || savingName} onClick={() => changeTab(id)}>{id === 'clone' && <Plus size={16} />}{label}{count !== null && <span>{count}</span>}</button>)}
         </div>
@@ -172,7 +171,7 @@ export function VoicePicker({ device, value, onChange }: Props) {
             </div>
           </> : <div className="vl-clone-layout"><div className="vl-clone-main"><h3>Clone và lưu giọng riêng</h3><p>Chỉ cần một đoạn audio rõ tiếng. Đặt tên để tìm lại dễ dàng trong Giọng của tôi.</p><label htmlFor="clone-name">1. Đặt tên giọng dễ nhớ</label><input id="clone-name" value={name} maxLength={100} disabled={cloning} onChange={e => setName(e.target.value)} placeholder="Ví dụ: Giọng mình · Review sản phẩm" /><small>Bạn có thể đổi tên bất cứ lúc nào sau khi lưu.</small><label htmlFor="clone-audio">2. Chọn audio mẫu</label><label className={`vl-upload ${cloning ? 'busy' : ''}`} htmlFor="clone-audio"><Upload size={25} /><strong>{file ? file.name : 'Bấm để chọn audio mẫu'}</strong><span>{file ? `${(file.size / 1024 / 1024).toFixed(1)} MB · Bấm để đổi file` : 'WAV, MP3, M4A, FLAC, OGG, WebM · tối đa 20 MB'}</span></label><input id="clone-audio" ref={fileInput} type="file" hidden accept=".wav,.mp3,.m4a,.flac,.ogg,.webm" disabled={cloning} onChange={e => { const next = e.target.files?.[0] || null; if (next && next.size > 20 * 1024 * 1024) { setError('Audio mẫu không được vượt quá 20 MB'); e.target.value = ''; setFile(null); return } setError(''); setFile(next) }} />{sourceUrl && <audio ref={sourceAudio} controls src={sourceUrl} onPlay={stopAudio} />}<button type="button" className="vl-primary vl-save-clone" disabled={!file || !name.trim() || cloning} onClick={() => void clone()}>{cloning ? <LoaderCircle size={18} className="spin" /> : <FolderHeart size={18} />}{cloning ? 'Đang clone và lưu giọng...' : 'Clone và lưu vào Giọng của tôi'}</button>{cloning && <small role="status">Đang xử lý audio. Giọng sẽ xuất hiện trong thư viện khi hoàn tất.</small>}</div><aside className="vl-clone-tips"><span className="voice-library-avatar"><AudioLines size={26} /></span><h3>Mẫu tốt, giọng rõ</h3><p>Đoạn thu dài <b>3–30 giây</b>, chỉ có một người nói, ít tiếng ồn và không có nhạc nền.</p><hr /><h3>Lưu một lần, dùng nhiều lần</h3><p>Giọng được lưu riêng trong <b>Giọng của tôi</b>, dùng được ở mọi dự án và vẫn còn sau khi khởi động lại.</p><p className="vl-tip-example">Tên gợi ý<br /><b>Giọng mình · Kể chuyện</b><br /><b>Giọng chị Lan · Quảng cáo</b></p></aside></div>}
         </div>
-        <div className="voice-library-footer">{tab === 'clone' ? <span><FolderHeart size={16} />Nơi lưu: Giọng của tôi</span> : <div><span><AudioLines size={16} />Mẫu nghe thử · 2 câu tiếng Việt</span><p>{SAMPLE}</p></div>}<button type="button" className="vl-close" disabled={cloning || savingName} onClick={closeLibrary}>Đóng</button></div>
+        <div className="voice-library-footer">{tab === 'clone' ? <span><FolderHeart size={16} />Nơi lưu: Giọng của tôi</span> : <div><span><AudioLines size={16} />Mẫu nghe thử · 2 câu tiếng Việt</span><p>{SAMPLE}</p></div>}<button type="button" className="vl-close" onClick={closeLibrary}>Đóng</button></div>
       </div>
     </dialog>, document.body)}
   </div>

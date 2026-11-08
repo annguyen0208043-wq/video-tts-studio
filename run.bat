@@ -38,6 +38,8 @@ call npm.cmd --prefix frontend run build
 if errorlevel 1 goto :failed
 
 :backend
+"%PYTHON%" "%~dp0scripts\start_local_postgres.py"
+if errorlevel 1 goto :failed
 cd /d "%~dp0backend"
 "%PYTHON%" -m alembic upgrade head
 if errorlevel 1 goto :failed

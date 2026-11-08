@@ -50,7 +50,7 @@ VIENEU_REPO=../VieNeu-TTS
 TTS_DEVICE=auto
 MAX_SEQUENCE_OUTPUTS=100
 MAX_UPLOAD_MB=4096
-MAX_CONCURRENT_JOBS=3
+MAX_CONCURRENT_JOBS=4
 VIENEU_OFFLINE=1
 "@
 [System.IO.File]::WriteAllText($EnvPath, $EnvContent, [System.Text.UTF8Encoding]::new($false))

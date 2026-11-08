@@ -1,5 +1,7 @@
 import { VoicePicker } from './VoicePicker'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { VideoThumbnail } from './VideoThumbnail'
+import { ActivityTray } from './ActivityTray'
+import { memo, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AudioLines, Bot, CheckCircle2, Clapperboard, Download, Eye, FolderOpen, Layers3,
   LoaderCircle, MousePointer2, Music, Pause, Pencil, Play, Plus, RefreshCw, Scissors, Sparkles, Trash2,
@@ -58,12 +60,14 @@ export default function App() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [system, setSystem] = useState<any>(null)
   const [tab, setTab] = useState<Tab>('media')
+  const [visitedTabs, setVisitedTabs] = useState<Set<Tab>>(() => new Set(['media']))
+  const currentProjectId = useRef(projectId)
+  currentProjectId.current = projectId
+  const refreshVersion = useRef(0)
   const [error, setError] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const jobsRef = useRef<Job[]>([])
   const assetsRef = useRef<Asset[]>([])
-  const jobsRefreshInFlight = useRef(false)
-  const assetsRefreshInFlight = useRef(false)
 
   const guarded: Guard = useCallback(async action => {
     setError('')
@@ -75,6 +79,7 @@ export default function App() {
     if (!projectId && values[0]) setProjectId(values[0].id)
   }), [guarded, projectId])
   const refreshProjectData = useCallback(() => {
+    const version = ++refreshVersion.current
     if (!projectId) { setAssets([]); setSequences([]); setJobs([]); return Promise.resolve() }
     return guarded(async () => {
       const [a, s, j] = await Promise.all([
@@ -82,42 +87,88 @@ export default function App() {
         request<VideoSequence[]>(`/projects/${projectId}/sequences`),
         request<Job[]>(`/jobs?project_id=${projectId}`),
       ])
-      setAssets(a); setSequences(s); setJobs(j)
+      if (currentProjectId.current !== projectId || version !== refreshVersion.current) return
+      startTransition(() => { setAssets(a); setSequences(s); setJobs(j) })
     })
   }, [guarded, projectId])
 
   useEffect(() => { refreshProjects(); request('/system/status').then(setSystem).catch(() => {}) }, [])
-  useEffect(() => { localStorage.setItem('projectId', projectId); refreshProjectData() }, [projectId, refreshProjectData])
+  useEffect(() => {
+    localStorage.setItem('projectId', projectId)
+    setAssets([]); setSequences([]); setJobs([])
+    jobsRef.current = []; assetsRef.current = []
+    refreshProjectData()
+  }, [projectId, refreshProjectData])
   useEffect(() => { jobsRef.current = jobs }, [jobs])
   useEffect(() => { assetsRef.current = assets }, [assets])
+  useEffect(() => { setVisitedTabs(new Set([tab])) }, [projectId])
+  useEffect(() => {
+    setVisitedTabs(old => old.has(tab) ? old : new Set([...old, tab]))
+    document.querySelectorAll<HTMLMediaElement>('.workspace-panel[hidden] video, .workspace-panel[hidden] audio').forEach(player => player.pause())
+  }, [tab])
+  useEffect(() => {
+    function accepted(event: Event) {
+      const incoming = (event as CustomEvent<Job[]>).detail.filter(job => job.project_id === currentProjectId.current)
+      if (!incoming.length) return
+      setJobs(current => {
+        const known = new Set(current.map(job => job.id))
+        const cancelled = new Map(incoming.filter(job => job.status === 'cancelled').map(job => [job.id, job]))
+        return [...incoming.filter(job => !known.has(job.id)), ...current.map(job => cancelled.get(job.id) || job)]
+      })
+    }
+    window.addEventListener('jobs-accepted', accepted)
+    return () => window.removeEventListener('jobs-accepted', accepted)
+  }, [])
   useEffect(() => {
     if (!projectId) return
+    let alive = true
+    let jobsInFlight = false
+    let assetsInFlight = false
+    let fallbackTimer: number | undefined
+    const loadJobs = () => {
+      if (jobsInFlight) return
+      jobsInFlight = true
+      request<Job[]>(`/jobs?project_id=${projectId}`).then(rows => {
+        if (alive && currentProjectId.current === projectId) startTransition(() => setJobs(rows))
+      }).catch(() => {}).finally(() => { jobsInFlight = false })
+    }
     const source = new EventSource(`/api/events?project_id=${projectId}`)
+    source.onopen = () => { window.clearInterval(fallbackTimer); fallbackTimer = undefined }
+    source.onerror = () => {
+      if (!fallbackTimer) { loadJobs(); fallbackTimer = window.setInterval(loadJobs, 5000) }
+    }
     source.addEventListener('jobs', event => {
+      if (!alive || currentProjectId.current !== projectId) return
       let summaries: Array<Pick<Job, 'id'|'status'|'progress'|'error_message'|'output_asset_id'>>
       try { summaries = JSON.parse((event as MessageEvent).data) } catch { return }
       const knownIds = new Set(jobsRef.current.map(job => job.id))
       const hasUnknownJob = summaries.some(job => !knownIds.has(job.id))
       const hasNewOutput = summaries.some(job => job.output_asset_id && !assetsRef.current.some(asset => asset.id === job.output_asset_id))
-      if (hasUnknownJob && !jobsRefreshInFlight.current) {
-        jobsRefreshInFlight.current = true
-        request<Job[]>(`/jobs?project_id=${projectId}`).then(setJobs).catch(() => {}).finally(()=>{jobsRefreshInFlight.current=false})
-      } else {
+      if (hasUnknownJob) loadJobs()
+      {
         const updates = new Map(summaries.map(job => [job.id, job]))
-        setJobs(current => current.map(job => updates.has(job.id) ? { ...job, ...updates.get(job.id)! } : job))
+        startTransition(() => setJobs(current => current.map(job => {
+          const update = updates.get(job.id)
+          return update && Object.entries(update).some(([key, value]) => job[key as keyof Job] !== value) ? { ...job, ...update } : job
+        })))
       }
-      if (hasNewOutput && !assetsRefreshInFlight.current) {
-        assetsRefreshInFlight.current = true
-        request<Asset[]>(`/projects/${projectId}/assets`).then(setAssets).catch(() => {}).finally(()=>{assetsRefreshInFlight.current=false})
+      if (hasNewOutput && !assetsInFlight) {
+        assetsInFlight = true
+        request<Asset[]>(`/projects/${projectId}/assets`).then(rows => {
+          if (alive && currentProjectId.current === projectId) startTransition(() => setAssets(rows))
+        }).catch(() => {}).finally(()=>{assetsInFlight=false})
       }
     })
-    return () => source.close()
+    return () => { alive = false; source.close(); window.clearInterval(fallbackTimer) }
   }, [projectId])
 
   const project = projects.find(item => item.id === projectId)
   const videos = useMemo(() => assets.filter(item => item.type === 'video'), [assets])
   const audios = useMemo(() => assets.filter(item => item.type === 'tts_audio' || item.type === 'external_audio'), [assets])
   const outputs = useMemo(() => assets.filter(item => item.type === 'output'), [assets])
+  const updateSequence = useCallback((sequence: VideoSequence) => {
+    setSequences(current => current.map(item => item.id === sequence.id ? sequence : item))
+  }, [])
 
   async function createProject() {
     const name = prompt('Tên project mới:')?.trim(); if (!name) return
@@ -176,14 +227,15 @@ export default function App() {
         </div>
       </div>
       {error && <ErrorBanner message={error} clear={() => setError('')} />}
-      {!projectId ? <Empty title="Bắt đầu bằng một project" text="Tạo project để quản lý từng chiến dịch video." action={<button onClick={createProject}><Plus size={16} /> Tạo project</button>} /> : <>
-        {tab === 'media' && <MediaPanel projectId={projectId} assets={assets} refresh={refreshProjectData} guarded={guarded} />}
-        {tab === 'scripts' && <AIScriptPanel key={projectId} projectId={projectId} guarded={guarded} setTab={setTab} />}
-        {tab === 'voice' && <VoicePanel projectId={projectId} audios={audios} jobs={jobs} guarded={guarded} />}
-        {tab === 'sequence' && <SequencePanel projectId={projectId} videos={videos} sequences={sequences} outputs={outputs} jobs={jobs} refresh={refreshProjectData} guarded={guarded} />}
-        {tab === 'render' && <RenderPanel key={projectId} projectId={projectId} audios={audios} sequences={sequences} outputs={outputs} jobs={jobs} system={system} guarded={guarded} setTab={setTab} refresh={refreshProjectData} />}
-        {tab === 'jobs' && <JobsPanel jobs={jobs} outputs={outputs} refresh={refreshProjectData} guarded={guarded} />}
-      </>}
+      {!projectId ? <Empty title="Bắt đầu bằng một project" text="Tạo project để quản lý từng chiến dịch video." action={<button onClick={createProject}><Plus size={16} /> Tạo project</button>} /> : <div key={projectId}>
+        {(tab === 'media' || visitedTabs.has('media')) && <div className="workspace-panel" hidden={tab !== 'media'}><MemoMediaPanel projectId={projectId} assets={assets} refresh={refreshProjectData} guarded={guarded} /></div>}
+        {(tab === 'scripts' || visitedTabs.has('scripts')) && <div className="workspace-panel" hidden={tab !== 'scripts'}><MemoAIScriptPanel key={projectId} projectId={projectId} guarded={guarded} setTab={setTab} /></div>}
+        {(tab === 'voice' || visitedTabs.has('voice')) && <div className="workspace-panel" hidden={tab !== 'voice'}><MemoVoicePanel projectId={projectId} audios={audios} jobs={jobs} guarded={guarded} /></div>}
+        {(tab === 'sequence' || visitedTabs.has('sequence')) && <div className="workspace-panel" hidden={tab !== 'sequence'}><MemoSequencePanel projectId={projectId} videos={videos} sequences={sequences} outputs={outputs} jobs={jobs} refresh={refreshProjectData} guarded={guarded} updateSequence={updateSequence} /></div>}
+        {(tab === 'render' || visitedTabs.has('render')) && <div className="workspace-panel" hidden={tab !== 'render'}><MemoRenderPanel key={projectId} projectId={projectId} audios={audios} sequences={sequences} outputs={outputs} jobs={jobs} system={system} guarded={guarded} setTab={setTab} refresh={refreshProjectData} /></div>}
+        {(tab === 'jobs' || visitedTabs.has('jobs')) && <div className="workspace-panel" hidden={tab !== 'jobs'}><MemoJobsPanel jobs={jobs} outputs={outputs} refresh={refreshProjectData} guarded={guarded} /></div>}
+      </div>}
+      <ActivityTray />
     </main>
   </div>
 }
@@ -313,6 +365,7 @@ function AIScriptPanel({ projectId, guarded, setTab }: { projectId: string; guar
 
   function continueToVoice(text: string) {
     localStorage.setItem(`tts-draft:${projectId}`, text)
+    window.dispatchEvent(new CustomEvent('voice-draft', { detail: { projectId, text } }))
     setTab('voice')
   }
 
@@ -329,7 +382,7 @@ function AIScriptPanel({ projectId, guarded, setTab }: { projectId: string; guar
           {skills.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}
         </select>
         <div className="skill-actions">
-          <input ref={skillFileRef} className="visually-hidden" type="file" accept=".md,.markdown,text/markdown,text/plain" onChange={e=>uploadSkill(e.target.files?.[0])}/>
+          <input ref={skillFileRef} className="visually-hidden" type="file" accept=".md,.markdown,text/markdown,text/plain" onChange={e=>{ const file = e.target.files?.[0]; e.target.value = ''; void uploadSkill(file) }}/>
           <button type="button" className="secondary skill-action" disabled={uploadingSkill} onClick={()=>skillFileRef.current?.click()}><Upload size={14}/>{uploadingSkill?'Đang tải...':'Tải Skill lên'}</button>
           <a className="button secondary skill-action" href="/api/ai/skills/template" download="SKILL_MAU_KICH_BAN_LINH_HOAT.md"><Download size={14}/>Skill mẫu</a>
           <button type="button" className="secondary skill-action" disabled={!skillId} onClick={manageSkill}><Eye size={14}/>Xem / sửa</button>
@@ -452,21 +505,19 @@ async function uploadAssets(projectId: string, files: FileList | File[] | null, 
   if (!files?.length) return []
   const form = new FormData(); Array.from(files).forEach(file => form.append('files', file))
   if (batchName) form.append('batch_name', batchName)
-  const response = await fetch(`/api/projects/${projectId}/assets/import`, { method: 'POST', body: form })
-  if (!response.ok) { const body = await response.json(); throw new Error(body.detail || 'Nhập file thất bại') }
-  return response.json() as Promise<Asset[]>
+  return request<Asset[]>(`/projects/${projectId}/assets/import`, { method: 'POST', body: form })
 }
 
 function MediaPanel({ projectId, assets, refresh, guarded }: { projectId: string; assets: Asset[]; refresh: () => Promise<void>; guarded: Guard }) {
   const [filter, setFilter] = useState('all'); const [busy, setBusy] = useState(false)
   const shown = filter === 'all' ? assets : assets.filter(item => item.type === filter)
-  async function upload(files: FileList | null) { await guarded(async () => { setBusy(true); await uploadAssets(projectId, files); await refresh(); setBusy(false) }); setBusy(false) }
+  async function upload(files: FileList | File[] | null) { await guarded(async () => { setBusy(true); await uploadAssets(projectId, files); await refresh(); setBusy(false) }); setBusy(false) }
   async function remove(id: string) { if (!confirm('Xóa asset và file này?')) return; await guarded(async () => { await request(`/assets/${id}`, { method: 'DELETE' }); await refresh() }) }
   return <section>
-    <div className="section-title compact-section-title"><div className="header-actions"><button className="secondary" onClick={() => guarded(async () => { await request(`/projects/${projectId}/open-folder`, { method:'POST' }) })}><FolderOpen size={16} /> Mở thư mục</button><label className="button"><Upload size={16} />{busy ? 'Đang nhập...' : 'Nhập file'}<input hidden multiple type="file" accept="video/*,audio/*" disabled={busy} onChange={e => upload(e.target.files)} /></label></div></div>
+    <div className="section-title compact-section-title"><div className="header-actions"><button className="secondary" onClick={() => guarded(async () => { await request(`/projects/${projectId}/open-folder`, { method:'POST' }) })}><FolderOpen size={16} /> Mở thư mục</button><label className="button"><Upload size={16} />{busy ? 'Đang nhập...' : 'Nhập file'}<input hidden multiple type="file" accept="video/*,audio/*" disabled={busy} onChange={e => { const files = Array.from(e.target.files || []); e.target.value = ''; void upload(files) }} /></label></div></div>
     <div className="segmented">{[['all','Tất cả'],['video','Video'],['tts_audio','TTS'],['external_audio','Audio'],['output','Output']].map(([id,label]) => <button key={id} className={filter === id ? 'active':''} onClick={() => setFilter(id)}>{label}</button>)}</div>
     {!shown.length ? <Empty title="Chưa có media" text="Nhập video hoặc tạo giọng đọc để bắt đầu." /> : <div className="asset-grid">{shown.map(asset => <article className="asset-card" key={asset.id}>
-      <div className="asset-preview">{asset.type === 'video' || asset.type === 'output' ? <video src={streamUrl(asset.id)} controls preload="none" poster={asset.thumbnail_path ? thumbnailUrl(asset.id) : undefined} /> : <AudioLines size={34} />}</div>
+      <div className="asset-preview">{asset.type === 'video' || asset.type === 'output' ? <video src={streamUrl(asset.id)} controls preload="none" poster={thumbnailUrl(asset.id)} /> : <AudioLines size={34} />}</div>
       <div className="asset-info"><strong>{asset.display_name}</strong><span>{asset.type} · {formatDuration(asset.duration_ms)} · {formatDateTime(asset.created_at)}</span></div>
       {asset.type.includes('audio') && <audio controls preload="none" src={streamUrl(asset.id)} />}
       <button className="danger-icon" onClick={() => remove(asset.id)}><Trash2 size={15} /></button>
@@ -480,9 +531,22 @@ function VoicePanel({ projectId, audios, jobs, guarded }: { projectId: string; a
   const [advanced, setAdvanced] = useState(false); const [useBatch, setUseBatch] = useState(true); const [batchSize, setBatchSize] = useState(16)
   const [temperature, setTemperature] = useState(.8); const [maxChars, setMaxChars] = useState(256); const [topK, setTopK] = useState(25); const [topP, setTopP] = useState(.95); const [repetition, setRepetition] = useState(1.2); const [silence, setSilence] = useState(.15)
   const [format, setFormat] = useState('mp3'); const [day, setDay] = useState('all'); const [editing, setEditing] = useState<Asset | null>(null)
-  const [submitting, setSubmitting] = useState(false); const [speed, setSpeed] = useState(1); const [importingExcel, setImportingExcel] = useState(false)
+  const [submitting, setSubmitting] = useState(0); const [speed, setSpeed] = useState(1)
+  const pendingNarrations = useRef(new Set<string>())
+  const [failedDrafts, setFailedDrafts] = useState<Array<{ id: string; text: string }>>([])
   const [groupName, setGroupName] = useState(''); const [audioGroup, setAudioGroup] = useState('all')
   const [excelFile, setExcelFile] = useState<File|null>(null)
+  const pendingGroups = useRef(new Set<string>())
+  useEffect(() => {
+    const receive = (event: Event) => {
+      const draft = (event as CustomEvent<{ projectId: string; text: string }>).detail
+      if (draft.projectId !== projectId) return
+      setText(draft.text)
+      localStorage.removeItem(`tts-draft:${projectId}`)
+    }
+    window.addEventListener('voice-draft', receive)
+    return () => window.removeEventListener('voice-draft', receive)
+  }, [projectId])
   const [selectedAudioIds, setSelectedAudioIds] = useState<string[]>([]); const [bulkSpeed, setBulkSpeed] = useState(1)
   const ttsQueue = jobs
     .filter(job => job.kind === 'tts' && ['queued','running'].includes(job.status))
@@ -502,17 +566,30 @@ function VoicePanel({ projectId, audios, jobs, guarded }: { projectId: string; a
   }
 
   async function generate() {
-    if (!text.trim() || !voice) throw new Error('Cần nhập văn bản và chọn giọng')
-    if (!name.trim()) return
-    setSubmitting(true)
-    await guarded(async () => { await request(`/projects/${projectId}/tts/jobs`, jsonOptions('POST', ttsPayload(text))); setText('') })
-    setSubmitting(false)
+    if (!text.trim() || !voice || !name.trim()) return
+    const submittedText = text
+    const payload = ttsPayload(submittedText)
+    const key = JSON.stringify(payload)
+    if (pendingNarrations.current.has(key)) return
+    pendingNarrations.current.add(key)
+    setSubmitting(count => count + 1)
+    setText('')
+    await guarded(async () => {
+      try { await request(`/projects/${projectId}/tts/jobs`, jsonOptions('POST', payload)) }
+      catch (error) {
+        setFailedDrafts(current => [...current, { id: crypto.randomUUID(), text: submittedText }])
+        throw error
+      } finally {
+        pendingNarrations.current.delete(key)
+        setSubmitting(count => count - 1)
+      }
+    })
   }
   async function importExcel(file: File | undefined) {
     if (!file) return
     const now = new Date()
     const prefix = `${now.getMonth()+1}-${now.getDate()}`
-    const used = new Set([...audioGroups, ...jobs.map(job => String(job.input_json.group_name || ''))])
+    const used = new Set([...pendingGroups.current, ...audioGroups, ...jobs.map(job => String(job.input_json.group_name || ''))])
     let index = 1
     while (used.has(`${prefix}-${index}`)) index++
     setGroupName(`${prefix}-${index}`)
@@ -521,16 +598,21 @@ function VoicePanel({ projectId, audios, jobs, guarded }: { projectId: string; a
   async function confirmExcel() {
     const file = excelFile
     if (!file || !groupName.trim()) return
-    if (!voice || !name.trim()) throw new Error('Cần nhập tên file và chọn giọng trước khi nhập Excel')
-    setImportingExcel(true)
+    if (!voice || !name.trim()) return
+    const submittedGroup = groupName.trim()
+    const form = new FormData()
+    form.append('upload', file)
+    form.append('settings', JSON.stringify({...ttsPayload('Nội dung lấy từ Excel'), group_name:submittedGroup}))
+    pendingGroups.current.add(submittedGroup)
+    setExcelFile(null)
     await guarded(async () => {
-      const form = new FormData()
-      form.append('upload', file)
-      form.append('settings', JSON.stringify({...ttsPayload('Nội dung lấy từ Excel'), group_name:groupName.trim()}))
-      await request(`/projects/${projectId}/tts/excel-jobs`, { method: 'POST', body: form })
-      setExcelFile(null)
+      try { await request(`/projects/${projectId}/tts/excel-jobs`, { method: 'POST', body: form }) }
+      catch (error) {
+        pendingGroups.current.delete(submittedGroup)
+        setExcelFile(current => current || file)
+        throw error
+      }
     })
-    setImportingExcel(false)
   }
   async function cancelTts(jobId: string) {
     await guarded(async () => { await request(`/jobs/${jobId}/cancel`, { method: 'POST' }) })
@@ -543,6 +625,11 @@ function VoicePanel({ projectId, audios, jobs, guarded }: { projectId: string; a
     })
   }
   return <section>
+    {failedDrafts.map(draft => <div className="error-banner" key={draft.id}>
+      <span>Chưa gửi được: {draft.text.slice(0, 100)}{draft.text.length > 100 ? '…' : ''}</span>
+      <button onClick={() => { setText(current => current ? `${current}\n\n${draft.text}` : draft.text); setFailedDrafts(old => old.filter(item => item.id !== draft.id)) }}>Đưa lại vào ô nhập</button>
+      <button onClick={() => setFailedDrafts(old => old.filter(item => item.id !== draft.id))}>Bỏ</button>
+    </div>)}
     {activeJob && <div className="tts-progress"><div><span>Đang tạo: {String(activeJob.input_json.name || 'voice')} · tiến độ ước tính</span><b>{Math.round(activeJob.progress)}%</b></div><div className="progress"><i style={{width:`${activeJob.progress}%`}} /></div></div>}
     <div className="two-columns"><div className="panel"><label>Văn bản</label><textarea rows={10} value={text} onChange={e => setText(e.target.value)} placeholder="Nhập nội dung cần đọc..." /><div className="counter">{text.length.toLocaleString()} ký tự</div>
       <div className="form-row"><div><label>Tên file gốc</label><input value={name} onChange={e => setName(e.target.value)} /><small className="field-hint">Tự động thêm _1, _2, _3...</small></div><div><label>Thiết bị</label><select value={device} onChange={e => setDevice(e.target.value)}><option value="cuda">CUDA</option><option value="auto">Auto</option><option value="cpu">CPU</option></select></div><div><label>Định dạng</label><select value={format} onChange={e => setFormat(e.target.value)}><option value="mp3">MP3</option><option value="wav">WAV</option></select></div></div>
@@ -551,8 +638,8 @@ function VoicePanel({ projectId, audios, jobs, guarded }: { projectId: string; a
       <p className="muted">Dán text: audio riêng. Nhập Excel: tạo một nhóm audio mới.</p>
       <button className="advanced-toggle" onClick={() => setAdvanced(v => !v)}>⚙ Tham số VieNeu {advanced ? '▲' : '▼'}</button>
       {advanced && <div className="advanced-grid"><label><span>Batch processing</span><input type="checkbox" checked={useBatch} onChange={e => setUseBatch(e.target.checked)} /></label><label><span>Batch size: {batchSize}</span><input type="range" min="1" max="64" step="1" value={batchSize} disabled={!useBatch} onChange={e => setBatchSize(+e.target.value)} /></label><label><span>Temperature: {temperature}</span><input type="range" min=".1" max="1.5" step=".1" value={temperature} onChange={e => setTemperature(+e.target.value)} /></label><label><span>Max chars: {maxChars}</span><input type="range" min="128" max="512" step="32" value={maxChars} onChange={e => setMaxChars(+e.target.value)} /></label><label><span>Top K: {topK}</span><input type="range" min="0" max="100" step="1" value={topK} onChange={e => setTopK(+e.target.value)} /></label><label><span>Top P: {topP}</span><input type="range" min=".1" max="1" step=".05" value={topP} onChange={e => setTopP(+e.target.value)} /></label><label><span>Repetition: {repetition}</span><input type="range" min="1" max="2" step=".1" value={repetition} onChange={e => setRepetition(+e.target.value)} /></label><label><span>Khoảng lặng: {silence}s</span><input type="range" min="0" max="3" step=".1" value={silence} onChange={e => setSilence(+e.target.value)} /></label></div>}
-      <button className="primary wide" disabled={submitting || !text.trim() || !voice || !name.trim()} onClick={generate}><Plus size={17} /> {submitting ? 'Đang thêm...' : 'Thêm vào hàng chờ'}</button>
-      <div className="excel-import"><div><strong>Nhập kịch bản từ Excel</strong><span>File .xlsx gồm 2 cột: STT (1 đến n) và text.</span></div><label className="button secondary"><Upload size={15}/>{importingExcel ? 'Đang đọc...' : 'Chọn file Excel'}<input hidden type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" disabled={importingExcel || !voice || !name.trim()} onChange={e => { const file = e.target.files?.[0]; e.target.value = ''; void importExcel(file) }}/></label></div>
+      <button className="primary wide" disabled={!text.trim() || !voice || !name.trim()} onClick={generate}><Plus size={17} /> {submitting && !text.trim() ? 'Đang gửi...' : 'Thêm vào hàng chờ'}</button>
+      <div className="excel-import"><div><strong>Nhập kịch bản từ Excel</strong><span>File .xlsx gồm 2 cột: STT (1 đến n) và text.</span></div><label className="button secondary"><Upload size={15}/>Chọn file Excel<input hidden type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" disabled={!voice || !name.trim()} onChange={e => { const file = e.target.files?.[0]; e.target.value = ''; void importExcel(file) }}/></label></div>
       <div className="tts-queue">
         <div className="panel-heading"><h3>Hàng chờ tạo giọng</h3><span className="count">{ttsQueue.length} tác vụ</span></div>
         {ttsQueue.length === 0 ? <p className="muted">Chưa có tác vụ. Bạn có thể thêm nhiều nội dung liên tiếp.</p> : ttsQueue.map((job, index) => <div className={`tts-queue-item ${job.status}`} key={job.id}>
@@ -563,14 +650,19 @@ function VoicePanel({ projectId, audios, jobs, guarded }: { projectId: string; a
       </div>
     </div><div className="panel"><div className="panel-heading"><h3>Thư viện audio</h3><div className="audio-filters"><select value={audioGroup} onChange={e => setAudioGroup(e.target.value)}><option value="all">Tất cả nhóm</option>{audioGroups.map(group => <option value={group} key={group}>{group}</option>)}</select><select value={day} onChange={e => setDay(e.target.value)}><option value="all">Tất cả ngày</option>{days.map(d => <option value={d} key={d}>{new Date(`${d}T00:00:00`).toLocaleDateString('vi-VN')}</option>)}</select></div></div><div className="audio-bulk"><span>{selectedAudioIds.length} audio đã chọn</span><label>Tốc độ <b>{bulkSpeed.toFixed(1)}×</b><input type="range" min=".5" max="2" step=".1" value={bulkSpeed} onChange={e=>setBulkSpeed(+e.target.value)}/></label><button className="secondary" disabled={!selectedAudioIds.length || bulkSpeed === 1} onClick={processAudioBatch}><Scissors size={14}/> Tạo bản hàng loạt</button></div>{filtered.length ? filtered.map(asset => <div className="audio-row" key={asset.id}><div><label className="audio-select"><input type="checkbox" checked={selectedAudioIds.includes(asset.id)} onChange={e=>setSelectedAudioIds(old=>e.target.checked?[...old,asset.id]:old.filter(id=>id!==asset.id))}/><strong>{asset.display_name}</strong></label><span>{String(asset.metadata_json.group_name || 'Riêng')} · {formatDateTime(asset.created_at)} · {formatDuration(asset.duration_ms)}</span></div><audio controls src={streamUrl(asset.id)} preload="none" /><button className="secondary edit-audio" onClick={() => setEditing(asset)}><Scissors size={14} /> Tốc độ / cắt</button></div>) : <p className="muted">Không có audio phù hợp bộ lọc.</p>}</div></div>
     {editing && <AudioEditor asset={editing} close={() => setEditing(null)} guarded={guarded} />}
-    {excelFile && <div className="modal-backdrop"><div className="modal"><h2>Tạo nhóm từ Excel</h2><p>{excelFile.name} · Toàn bộ kịch bản dùng giọng và tham số đang chọn.</p><label>Tên nhóm mới</label><input maxLength={100} value={groupName} onChange={e=>setGroupName(e.target.value)}/><p>Gợi ý tháng-ngày-index; bạn có thể sửa tên.</p><div className="header-actions"><button disabled={importingExcel} className="secondary" onClick={()=>setExcelFile(null)}>Hủy</button><button disabled={importingExcel || !groupName.trim()} onClick={confirmExcel}>{importingExcel?'Đang nhập…':'Xác nhận chạy'}</button></div></div></div>}
+    {excelFile && <div className="modal-backdrop"><div className="modal"><h2>Tạo nhóm từ Excel</h2><p>{excelFile.name} · Toàn bộ kịch bản dùng giọng và tham số đang chọn.</p><label>Tên nhóm mới</label><input maxLength={100} value={groupName} onChange={e=>setGroupName(e.target.value)}/><p>Gợi ý tháng-ngày-index; bạn có thể sửa tên.</p><div className="header-actions"><button className="secondary" onClick={()=>setExcelFile(null)}>Hủy</button><button disabled={!groupName.trim()} onClick={confirmExcel}>Xác nhận chạy</button></div></div></div>}
   </section>
 }
 
 function AudioEditor({ asset, close, guarded }: { asset: Asset; close: () => void; guarded: Guard }) {
   const duration = (asset.duration_ms || 0) / 1000
   const [speed, setSpeed] = useState(1); const [start, setStart] = useState(0); const [end, setEnd] = useState(duration); const [name, setName] = useState(`${asset.display_name}-edited`)
-  async function save() { await guarded(async () => { await request(`/assets/${asset.id}/audio/jobs`, jsonOptions('POST', { name, speed, trim_start:start, trim_end:end, output_format:'mp3' })); close() }) }
+  async function save() {
+    if (!name.trim() || end <= start) return
+    const operation = request(`/assets/${asset.id}/audio/jobs`, jsonOptions('POST', { name, speed, trim_start:start, trim_end:end, output_format:'mp3' }))
+    close()
+    await guarded(async () => { await operation })
+  }
   return <div className="modal-backdrop"><div className="modal"><div className="panel-heading"><h2>Chỉnh audio</h2><button className="icon-button" onClick={close}>×</button></div><audio controls src={streamUrl(asset.id)} preload="none" /><label>Tên file mới</label><input value={name} onChange={e => setName(e.target.value)} /><label>Tốc độ: <b>{speed.toFixed(1)}×</b></label><input type="range" min=".5" max="2" step=".1" value={speed} onChange={e => setSpeed(+e.target.value)} /><div className="form-row"><div><label>Bắt đầu (giây)</label><input type="number" min="0" max={end} step=".1" value={start} onChange={e => setStart(+e.target.value)} /></div><div><label>Kết thúc (giây)</label><input type="number" min={start} max={duration} step=".1" value={end} onChange={e => setEnd(+e.target.value)} /></div></div><p className="muted">Kết quả dự kiến: {((end-start)/speed).toFixed(1)} giây</p><button className="primary wide" onClick={save}><Scissors size={16} /> Tạo bản MP3 mới</button></div></div>
 }
 
@@ -580,7 +672,8 @@ function estimateOutputs(count: number, mode: string) {
   return mode === 'pair_both_orders' || mode === 'pair_self_repeats' ? 2 : 1
 }
 
-function SequencePanel({ projectId, videos, sequences, outputs, jobs, refresh, guarded }: { projectId:string; videos:Asset[]; sequences:VideoSequence[]; outputs:Asset[]; jobs:Job[]; refresh:()=>Promise<void>; guarded:Guard }) {
+function SequencePanel({ projectId, videos, sequences, outputs, jobs, refresh, guarded, updateSequence }: { projectId:string; videos:Asset[]; sequences:VideoSequence[]; outputs:Asset[]; jobs:Job[]; refresh:()=>Promise<void>; guarded:Guard; updateSequence:(sequence:VideoSequence)=>void }) {
+  const pendingToggles = useRef(new Set<string>())
   const newBatch = (index:number):BatchDraft => {
     const now = new Date()
     const time = `${String(now.getHours()).padStart(2,'0')}-${String(now.getMinutes()).padStart(2,'0')}`
@@ -720,7 +813,14 @@ function SequencePanel({ projectId, videos, sequences, outputs, jobs, refresh, g
   }
 
   async function toggleSequence(seq:VideoSequence){
-    await guarded(async()=>{ await request(`/sequences/${seq.id}`,jsonOptions('PATCH',{enabled:!seq.enabled})); await refresh() })
+    if (pendingToggles.current.has(seq.id)) return
+    pendingToggles.current.add(seq.id)
+    updateSequence({...seq, enabled:!seq.enabled})
+    await guarded(async()=>{
+      try { updateSequence(await request<VideoSequence>(`/sequences/${seq.id}`,jsonOptions('PATCH',{enabled:!seq.enabled}))) }
+      catch (error) { updateSequence(seq); throw error }
+      finally { pendingToggles.current.delete(seq.id) }
+    })
   }
 
   async function deleteSavedBatch(batchName:string) {
@@ -869,7 +969,7 @@ function SequencePanel({ projectId, videos, sequences, outputs, jobs, refresh, g
                     {[0,1].map(slot => {
                       const video = selectedVideos[slot]
                       return video ? <div className="compact-video-chip" key={video.id} title={video.display_name}>
-                        <div><video src={streamUrl(video.id)} preload="none" muted/><span>{labels[video.id]}</span></div>
+                        <div><VideoThumbnail asset={video}/><span>{labels[video.id]}</span></div>
                         <b>{video.display_name}</b>
                         <button title="Bỏ video" onClick={()=>removeVideoFromBatch(batch.id, video.id)}>×</button>
                       </div> : <button className="empty-video-slot" key={slot} onClick={()=>addSelectedToBatch(batch.id)} title="Chọn video trong kho bên phải">
@@ -948,7 +1048,7 @@ function SequencePanel({ projectId, videos, sequences, outputs, jobs, refresh, g
           </div>
           <label className="button small">
             <Upload size={14}/>{uploading ? 'Đang thêm...' : 'Thêm video'}
-            <input hidden multiple type="file" accept="video/*" disabled={uploading} onChange={e=>upload(e.target.files)}/>
+            <input hidden multiple type="file" accept="video/*" disabled={uploading} onChange={e=>{ const files = Array.from(e.target.files || []); e.target.value = ''; void upload(files) }}/>
           </label>
         </div>
         {selectedSourceIds.size > 0 && <div className="library-selection-status"><CheckCircle2 size={14}/><b>{selectedSourceIds.size} đã chọn</b><button onClick={()=>setSelectedSourceIds(new Set())}>Bỏ chọn</button></div>}
@@ -968,7 +1068,7 @@ function SequencePanel({ projectId, videos, sequences, outputs, jobs, refresh, g
                   onDragStart={e => { if (isUsed) { e.preventDefault(); return }; e.dataTransfer.setData('videoId', video.id) }}
                 >
                   <div className="video-source-card-thumb">
-                    <video src={streamUrl(video.id)} preload="none" muted onClick={e => e.stopPropagation()}/>
+                    <VideoThumbnail asset={video}/>
                     <span className="media-label-badge">{labels[video.id]}</span>
                     {isUsed
                       ? <div className="video-source-used">Đã dùng</div>
@@ -1259,9 +1359,6 @@ function RenderPanel({ projectId, audios, sequences, outputs, jobs, system, guar
     request<BgmTrack[]>('/bgm').then(setGlobalBgmTracks).catch(() => {})
   }, [])
 
-  async function refreshBgmLibrary() {
-    try { setGlobalBgmTracks(await request<BgmTrack[]>('/bgm')) } catch {}
-  }
   const [previewSeq, setPreviewSeq] = useState<VideoSequence | null>(null)
   const [batchFilter, setBatchFilter] = useState<string[] | 'all'>([])
   const [selectedIds, setSelectedIds] = useState<string[]>([])
@@ -1373,22 +1470,25 @@ function RenderPanel({ projectId, audios, sequences, outputs, jobs, system, guar
     })
   }
 
-  async function handleUploadBgm(files: FileList | null) {
+  async function handleUploadBgm(files: FileList | File[] | null) {
     if (!files?.length) return
     await guarded(async () => {
       setUploadingBgm(true)
-      const form = new FormData()
-      Array.from(files).forEach(f => form.append('files', f))
-      await request<BgmTrack[]>('/bgm/upload', { method: 'POST', body: form })
-      await refreshBgmLibrary()
-      setUploadingBgm(false)
+      try {
+        const form = new FormData()
+        Array.from(files).forEach(f => form.append('files', f))
+        const created = await request<BgmTrack[]>('/bgm/upload', { method: 'POST', body: form })
+        setGlobalBgmTracks(old => [...created, ...old])
+      } finally { setUploadingBgm(false) }
     })
   }
 
   async function deleteBgmTrack(trackId: string) {
     if (!confirm('Xóa nhạc nền này khỏi kho?')) return
-    await request('/bgm/' + trackId, { method: 'DELETE' })
-    await refreshBgmLibrary()
+    await guarded(async () => {
+      await request('/bgm/' + trackId, { method: 'DELETE' })
+      setGlobalBgmTracks(old => old.filter(track => track.id !== trackId))
+    })
   }
 
   function applyBgmToAll(bgmId: string) {
@@ -1441,7 +1541,7 @@ function RenderPanel({ projectId, audios, sequences, outputs, jobs, system, guar
   async function render() {
     await guarded(async () => {
       if (!allowMissing && missingAudioCount) throw new Error(`Còn ${missingAudioCount} video chưa có audio`)
-      await request(
+      const operation = request(
         `/projects/${projectId}/render/jobs`,
         jsonOptions('POST', {
           items: selectedSequences.map(seq => {
@@ -1472,6 +1572,7 @@ function RenderPanel({ projectId, audios, sequences, outputs, jobs, system, guar
         })
       )
       setTab('jobs')
+      await operation
     })
   }
 
@@ -1498,7 +1599,7 @@ function RenderPanel({ projectId, audios, sequences, outputs, jobs, system, guar
           {audioTab === 'bgm' && (
             <label className="button small">
               <Upload size={13} /> {uploadingBgm ? 'Đang tải...' : 'Thêm nhạc nền'}
-              <input hidden multiple type="file" accept="audio/*" disabled={uploadingBgm} onChange={e => handleUploadBgm(e.target.files)} />
+              <input hidden multiple type="file" accept="audio/*" disabled={uploadingBgm} onChange={e => { const files = Array.from(e.target.files || []); e.target.value = ''; void handleUploadBgm(files) }} />
             </label>
           )}
           {audioTab === 'voice' && (
@@ -1668,7 +1769,7 @@ function RenderPanel({ projectId, audios, sequences, outputs, jobs, system, guar
             >
               <div className="render-preview">
                 {seq.items.map((item, index) => (
-                  <video key={item.id} controls muted preload="none" src={streamUrl(item.asset.id)} className={index === 0 ? 'main-preview' : 'mini-preview'} />
+                  <video key={item.id} controls muted preload="none" poster={thumbnailUrl(item.asset.id)} src={streamUrl(item.asset.id)} className={index === 0 ? 'main-preview' : 'mini-preview'} />
                 ))}
               </div>
 
@@ -1828,7 +1929,7 @@ function JobsPanel({ jobs, outputs, refresh, guarded }: { jobs:Job[]; outputs:As
     return saved==='large'||saved==='small'?'large'===saved?'large':'small':'compact'
   })
   useEffect(()=>localStorage.setItem('outputGridDensity',gridDensity),[gridDensity])
-  async function action(job:Job,kind:'cancel'|'retry'){await guarded(async()=>{await request(`/jobs/${job.id}/${kind}`,{method:'POST'});await refresh()})}
+  async function action(job:Job,kind:'cancel'|'retry'){await guarded(async()=>{await request(`/jobs/${job.id}/${kind}`,{method:'POST'})})}
   const renderBatchKey = (job:Job) => String(job.input_json.group_name || job.input_json.run_timestamp || job.input_json.run_folder || job.input_json.batch_name || job.id)
   const visibleJobs = useMemo(()=>{
     const recentBatches = new Set([...jobs].filter(job=>job.kind==='render').sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)).map(renderBatchKey).filter((key,index,array)=>array.indexOf(key)===index).slice(0,3))
@@ -1867,6 +1968,7 @@ function JobsPanel({ jobs, outputs, refresh, guarded }: { jobs:Job[]; outputs:As
   }
   useEffect(()=>{
     const handleKeyDown=(event:KeyboardEvent)=>{
+      if(!document.querySelector('.workspace-panel:not([hidden]) .results-layout'))return
       if(event.key!=='F2'||editingOutputId)return
       const selected=outputs.find(item=>item.id===selectedOutputIds[selectedOutputIds.length-1])
       if(!selected)return
@@ -1897,13 +1999,14 @@ function JobsPanel({ jobs, outputs, refresh, guarded }: { jobs:Job[]; outputs:As
   }
   async function writeStreamToFile(directory:FileSystemDirectoryHandle,fileName:string,assetId:string){
     const response=await fetch(streamUrl(assetId),{cache:'no-store'});if(!response.ok)throw new Error(`Không tải được ${fileName}`)
-    const buffer=await response.arrayBuffer();
-    if(!buffer.byteLength)throw new Error(`File tải về rỗng: ${fileName}`)
+    if(!response.body)throw new Error(`Không tải được ${fileName}`)
     const fileHandle=await directory.getFileHandle(fileName,{create:true})
     const writable=await fileHandle.createWritable()
     try{
-      await writable.write(new Uint8Array(buffer))
-      await writable.close()
+      let bytes=0
+      const measured=new TransformStream<Uint8Array,Uint8Array>({transform(chunk,controller){bytes+=chunk.byteLength;controller.enqueue(chunk)}})
+      await response.body.pipeThrough(measured).pipeTo(writable)
+      if(!bytes)throw new Error(`File tải về rỗng: ${fileName}`)
     }catch(error){
       await writable.close().catch(()=>{})
       try{await directory.removeEntry(fileName)}catch{}
@@ -1954,8 +2057,15 @@ function JobsPanel({ jobs, outputs, refresh, guarded }: { jobs:Job[]; outputs:As
       }finally{setDownloading(false);setDownloadProgress('')}
     })
   }
-  return <section><div className="section-title"><div><h2>Công việc & kết quả</h2><p>Tối đa 3 job media chạy đồng thời; TTS được khóa riêng để an toàn GPU.</p></div><div className="download-root-picker"><span>{downloadRoot?`Thư mục lưu: ${downloadRoot.name}`:'Chưa chọn thư mục lưu'}</span><button className="secondary" onClick={()=>guarded(async()=>{await chooseDownloadRoot()})}><FolderOpen size={15}/>{downloadRoot?'Đổi thư mục lưu':'Chọn thư mục lưu'}</button></div></div><div className="results-layout"><div className="results-videos"><div className="all-output-actions"><button className="primary download-all-batches" disabled={!outputs.length||downloading} onClick={downloadAllOutputs}><Download size={15}/>{downloading?`Đang tải ${downloadProgress}`:`Tải toàn bộ ${outputGroups.length} batch (${outputs.length} video)`}</button><div className="bulk-rename-all"><input value={allOutputsName} onChange={e=>setAllOutputsName(e.target.value)} placeholder="Tên mới cho toàn bộ video"/><button className="secondary" disabled={!allOutputsName.trim()||!outputs.length} onClick={renameAllOutputs}>Đổi tên toàn bộ file</button></div></div><div className="grid-density-toolbar"><span>Kích thước lưới</span><div className="segmented">{([['large','Lớn'],['compact','Gọn'],['small','Nhỏ']] as const).map(([value,label])=><button key={value} className={gridDensity===value?'active':''} onClick={()=>setGridDensity(value)}>{label}</button>)}</div></div>
+  return <section><div className="section-title"><div><h2>Công việc & kết quả</h2><p>Tối đa 4 job media chạy đồng thời; TTS được khóa riêng để an toàn GPU.</p></div><div className="download-root-picker"><span>{downloadRoot?`Thư mục lưu: ${downloadRoot.name}`:'Chưa chọn thư mục lưu'}</span><button className="secondary" onClick={()=>guarded(async()=>{await chooseDownloadRoot()})}><FolderOpen size={15}/>{downloadRoot?'Đổi thư mục lưu':'Chọn thư mục lưu'}</button></div></div><div className="results-layout"><div className="results-videos"><div className="all-output-actions"><button className="primary download-all-batches" disabled={!outputs.length||downloading} onClick={downloadAllOutputs}><Download size={15}/>{downloading?`Đang tải ${downloadProgress}`:`Tải toàn bộ ${outputGroups.length} batch (${outputs.length} video)`}</button><div className="bulk-rename-all"><input value={allOutputsName} onChange={e=>setAllOutputsName(e.target.value)} placeholder="Tên mới cho toàn bộ video"/><button className="secondary" disabled={!allOutputsName.trim()||!outputs.length} onClick={renameAllOutputs}>Đổi tên toàn bộ file</button></div></div><div className="grid-density-toolbar"><span>Kích thước lưới</span><div className="segmented">{([['large','Lớn'],['compact','Gọn'],['small','Nhỏ']] as const).map(([value,label])=><button key={value} className={gridDensity===value?'active':''} onClick={()=>setGridDensity(value)}>{label}</button>)}</div></div>
     {outputGroups.map(([folder,items])=>{const selectedCount=items.filter(item=>selectedOutputIds.includes(item.id)).length;const selecting=selectingFolder===folder;return <div key={folder} className="output-group"><div className="output-group-heading"><h2>{folder} <span className="count">{items.length}</span></h2><div className="output-download-actions"><button className={selecting?'primary':'secondary'} onClick={()=>{setSelectingFolder(selecting?null:folder);if(!selecting)setSelectedOutputIds(old=>old.filter(id=>!items.some(item=>item.id===id)))}}><Download size={15}/>{selecting?'Xong chọn': 'Chọn video để tải'}</button>{selecting&&<button className="secondary" onClick={()=>toggleOutputGroup(items)}>{selectedCount===items.length?'Bỏ chọn tất cả':'Chọn tất cả'}</button>}{selecting&&<button className="secondary" disabled={!selectedCount||downloading} onClick={()=>downloadOutputs(folder,items)}>{downloading?`Đang tải ${downloadProgress}`:`Tải ${selectedCount} đã chọn`}</button>}<button className="primary" disabled={downloading} onClick={()=>downloadOutputs(folder,items,true)}>{downloading?`Đang tải ${downloadProgress}`:`Tải cả thư mục (${items.length})`}</button></div><div className="bulk-rename"><input value={renameNames[folder]||''} onChange={e=>setRenameNames(old=>({...old,[folder]:e.target.value}))} placeholder="Tên mới, ví dụ: gocdoxinh"/><button className="secondary" disabled={!renameNames[folder]?.trim()} onClick={()=>renameGroup(folder,items)}>Đổi tên tất cả</button></div></div>{selecting&&<p className="selection-hint">Đang chọn tải: click vào từng video · đã chọn {selectedCount}/{items.length} · file sẽ lưu trong thư mục con {folder}</p>}<p className="rename-preview">Kết quả: {renameNames[folder]?.trim()||'ten-file'}-1.mp4, {renameNames[folder]?.trim()||'ten-file'}-2.mp4, …</p><div className={`output-grid density-${gridDensity}${selecting?' selecting':''}`}>{items.map(o=>{const selected=selectedOutputIds.includes(o.id);const editing=editingOutputId===o.id;return <article className={selected?'output-selected':''} key={o.id} onClick={e=>{if((e.target as HTMLElement).closest('video,button,input'))return;if(selecting)setSelectedOutputIds(old=>old.includes(o.id)?old.filter(id=>id!==o.id):[...old,o.id]);else setSelectedOutputIds([o.id])}}><div className="output-checkmark">{selected?'✓':''}</div><video controls={!selecting} src={streamUrl(o.id)} preload="none"/><div className="output-file-name">{editing?<input ref={outputNameInputRef} value={editingOutputName} onChange={e=>setEditingOutputName(e.target.value)} onBlur={()=>setEditingOutputId(null)} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();void saveSingleOutputName(o)}else if(e.key==='Escape')setEditingOutputId(null)}}/>:<strong>{o.display_name}</strong>}{selected&&!editing&&<button type="button" title="Đổi tên (F2)" onClick={e=>{e.stopPropagation();startRenameOutput(o)}}><Pencil size={12}/></button>}</div><span>{formatDuration(o.duration_ms)} · {o.width}×{o.height}</span></article>})}</div></div>})}
 </div><aside className="jobs-sidebar"><h3>Đang chạy & 3 batch gần nhất</h3><div className="job-list">{visibleJobs.map(job=><article className="job" key={job.id}><div className={`job-status ${job.status}`}>{job.status==='completed'?<CheckCircle2/>:job.status==='failed'?<XCircle/>:<LoaderCircle className={['running','rendering','processing'].includes(job.status)?'spin':''}/>}</div><div className="job-body"><div><strong>{job.kind==='tts'?'Tạo giọng':job.kind==='audio_process'?'Chỉnh audio':'Render video'}</strong><span>{formatDateTime(job.created_at)} · {job.status} · {Math.round(job.progress)}%</span></div><div className="progress"><i style={{width:`${job.progress}%`}}/></div>{job.error_message&&<p className="job-error">{job.error_message}</p>}</div><div className="job-actions">{['queued','running','rendering','processing'].includes(job.status)&&<button onClick={()=>action(job,'cancel')}>Hủy</button>}{['failed','cancelled'].includes(job.status)&&<button onClick={()=>action(job,'retry')}>Thử lại</button>}</div></article>)}</div></aside></div>
   </section>
 }
+
+const MemoMediaPanel = memo(MediaPanel)
+const MemoAIScriptPanel = memo(AIScriptPanel)
+const MemoVoicePanel = memo(VoicePanel)
+const MemoSequencePanel = memo(SequencePanel)
+const MemoRenderPanel = memo(RenderPanel)
+const MemoJobsPanel = memo(JobsPanel)

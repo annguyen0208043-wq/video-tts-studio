@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, text
 try:
     with create_engine(settings.database_url, connect_args={"connect_timeout": 10}).connect() as connection:
         assert connection.execute(text("SELECT 1")).scalar() == 1
-    print("Supabase connection OK")
+    print("Database connection OK")
 except Exception as exc:
     print(f"Database check failed: {type(exc).__name__}")
     # Driver errors describe DNS, transport, and authentication failures without

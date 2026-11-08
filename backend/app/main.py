@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
+from starlette.concurrency import run_in_threadpool
 
 from app.api import assets, bgm, jobs, projects, scripts, sequences, system
 from app.core.config import ROOT_DIR, settings
@@ -24,6 +25,9 @@ async def lifespan(_: FastAPI):
     configure_logging()
     ensure_storage()
     Base.metadata.create_all(bind=engine)
+    from app.services.voice_library import sync_library
+
+    await run_in_threadpool(sync_library)
     # A process restart cannot keep ownership of an old FFmpeg/TTS process.
     # Mark interrupted work clearly and resume jobs that never started.
     with SessionLocal() as db:

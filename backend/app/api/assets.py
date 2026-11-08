@@ -3,12 +3,15 @@ from __future__ import annotations
 import shutil
 import tempfile
 import zipfile
+import threading
+from functools import lru_cache
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -26,6 +29,11 @@ from app.services.storage_service import (
 
 
 router = APIRouter(tags=["assets"])
+
+
+@lru_cache(maxsize=512)
+def _thumbnail_lock(asset_id: str):
+    return threading.Lock()
 
 
 @router.post("/projects/{project_id}/assets/import", response_model=list[AssetOut], status_code=201)
@@ -62,7 +70,7 @@ def import_assets(
             info = probe(destination)
             thumbnail = None
             if asset_type == "video":
-                thumbnail_file = root / "thumbnails" / f"{destination.stem}.jpg"
+                thumbnail_file = root / "thumbnails" / f"{uuid4().hex}.jpg"
                 try:
                     create_thumbnail(destination, thumbnail_file)
                     thumbnail = relative_to_project(project_id, thumbnail_file)
@@ -161,11 +169,29 @@ def download_asset(asset_id: str, db: Session = Depends(get_db)):
 @router.get("/assets/{asset_id}/thumbnail")
 def asset_thumbnail(asset_id: str, db: Session = Depends(get_db)):
     asset = _asset_or_404(asset_id, db)
-    if not asset.thumbnail_path:
+    if asset.type not in {"video", "output"}:
         raise HTTPException(404, "Asset không có thumbnail")
-    path = resolve_asset_path(asset.project_id, asset.thumbnail_path)
+    if asset.thumbnail_path:
+        path = resolve_asset_path(asset.project_id, asset.thumbnail_path)
+        if path.is_file():
+            db.close()
+            return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+    project_id = asset.project_id
+    source = resolve_asset_path(project_id, asset.relative_path)
+    path = create_project_dirs(project_id) / "thumbnails" / f"{asset_id}.jpg"
     db.close()
-    return FileResponse(path, media_type="image/jpeg")
+    if not source.is_file():
+        raise HTTPException(404, "File video không còn tồn tại")
+    # Repair older uploads lazily, without keeping a DB connection during FFmpeg.
+    with _thumbnail_lock(asset_id):
+        if not path.is_file():
+            try:
+                create_thumbnail(source, path)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+        db.execute(update(Asset).where(Asset.id == asset_id).values(thumbnail_path=relative_to_project(project_id, path)))
+        db.commit()
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
 
 
 @router.delete("/assets/{asset_id}", status_code=204)

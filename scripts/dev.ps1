@@ -10,6 +10,8 @@ if (-not (Test-Path (Join-Path $ProjectRoot ".env"))) {
     throw "Thiếu .env. Hãy copy .env.example thành .env và điền mật khẩu PostgreSQL."
 }
 
+& $Python (Join-Path $PSScriptRoot 'start_local_postgres.py')
+if ($LASTEXITCODE -ne 0) { throw 'Local PostgreSQL startup failed.' }
 Start-Process -FilePath $Python -ArgumentList "-m", "uvicorn", "app.main:app", "--reload", "--host", "127.0.0.1", "--port", "8765" -WorkingDirectory $BackendDir -WindowStyle Hidden
 & npm.cmd --prefix (Join-Path $ProjectRoot "frontend") run dev
 

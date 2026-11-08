@@ -12,7 +12,7 @@ from app.models import Asset, Sequence
 
 
 def test_excel_groups_and_manual_text(monkeypatch):
-    monkeypatch.setattr(job_manager, 'submit', lambda _: None)
+    monkeypatch.setattr(job_manager, 'submit', lambda _, kind=None: None)
     book = Workbook()
     book.active.append(['STT', 'text'])
     book.active.append([1, 'Xin chào'])
@@ -34,7 +34,7 @@ def test_excel_groups_and_manual_text(monkeypatch):
 
 
 def test_render_requires_explicit_audio_exceptions(monkeypatch):
-    monkeypatch.setattr(job_manager, 'submit', lambda _: None)
+    monkeypatch.setattr(job_manager, 'submit', lambda _, kind=None: None)
     with TestClient(app) as client:
         project = client.post('/api/projects', json={'name': 'Render rules'}).json()['id']
         with SessionLocal() as db:

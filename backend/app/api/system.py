@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -64,7 +64,7 @@ def system_status():
 @router.get("/tts/voices")
 def tts_voices(device: str = "auto"):
     try:
-        return [{**voice, "preview_url": preview_url(voice["id"])} for voice in tts_service.voices(device)]
+        return tts_service.voices(device)
     except Exception as exc:
         raise HTTPException(503, str(exc)) from exc
 
@@ -133,7 +133,12 @@ def get_voice_preview(filename: str):
     if not re.fullmatch(r"[a-f0-9]{64}\.wav", filename):
         raise HTTPException(404, "Không tìm thấy bản nghe thử")
     path = library_dir() / "previews" / filename
-    if not path.is_file():
+    if path.is_file():
+        return FileResponse(path, media_type="audio/wav")
+    from app.services.voice_store import preview
+
+    audio = preview(Path(filename).stem)
+    if audio is None:
         raise HTTPException(404, "Không tìm thấy bản nghe thử")
-    return FileResponse(path, media_type="audio/wav")
+    return Response(content=audio, media_type="audio/wav")
 

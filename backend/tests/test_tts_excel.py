@@ -9,7 +9,7 @@ from app.main import app
 
 
 def test_excel_import_queues_rows_with_incrementing_names(monkeypatch):
-    monkeypatch.setattr(job_manager, "submit", lambda _job_id: None)
+    monkeypatch.setattr(job_manager, "submit", lambda _job_id, kind=None: None)
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(["STT", "text"])

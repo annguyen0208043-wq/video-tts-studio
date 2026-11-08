@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import importlib.util
 import logging
 import re
 import subprocess
@@ -10,6 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.core.config import settings
+from app.services import voice_store
 
 
 PREVIEW_TEXT = "Xin chào, rất vui được gặp bạn hôm nay. Chúc bạn một ngày thật nhiều niềm vui và công việc luôn thuận lợi."
@@ -25,7 +27,60 @@ def preview_path(voice: str) -> Path:
 
 def preview_url(voice: str) -> str | None:
     path = preview_path(voice)
-    return f"/api/system/tts/previews/{path.name}" if path.is_file() else None
+    return f"/api/system/tts/previews/{path.name}" if voice_store.has_preview(voice, path.stem) or path.is_file() else None
+
+
+def _public_voice(row: dict) -> dict:
+    item = {"id": row["id"], "label": row["label"]}
+    if row["custom"]:
+        item["custom"] = True
+    key = row.get("preview_key")
+    if row.get("has_preview") and key == preview_path(row["id"]).stem:
+        item["preview_url"] = f"/api/system/tts/previews/{key}.wav"
+    return item
+
+
+def sync_library() -> None:
+    """Import legacy files once. Never load the model or synthesize audio."""
+    known = {row["id"]: row for row in voice_store.catalog()}
+    entries = []
+    voices_file = settings.vieneu_repo / "src" / "vieneu" / "assets" / "voices_v3_turbo.json" if hasattr(settings, "vieneu_repo") else None
+    if voices_file is None or not voices_file.exists():
+        package = importlib.util.find_spec("vieneu")
+        voices_file = Path(package.origin).parent / "assets" / "voices_v3_turbo.json" if package and package.origin else None
+    if voices_file and voices_file.exists():
+        presets = json.loads(voices_file.read_text(encoding="utf-8")).get("presets", {})
+        for voice_id, info in sorted(presets.items(), key=lambda pair: (pair[1].get("featured", 9999), pair[0])):
+            if voice_id not in known:
+                entries.append({"id": voice_id, "label": f"{'⭐ ' if info.get('featured') else ''}{voice_id} — {info.get('description', '')}",
+                                "custom": False, "payload": {"voice": {"speaker_emb": info["speaker_emb"], "codes": info.get("codes")}}})
+    for manifest in sorted(library_dir().glob("clone_*.json")):
+        if not CLONE_ID.fullmatch(manifest.stem) or manifest.stem in known:
+            continue
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        reference = manifest.with_suffix(".wav")
+        entries.append({"id": manifest.stem, "label": f"Giọng clone · {payload['name']}", "custom": True,
+                        "payload": payload, "reference_audio": reference.read_bytes() if reference.is_file() else None})
+    voice_store.seed(entries)
+    rows = voice_store.catalog() if entries else list(known.values())
+    samples = []
+    for row in rows:
+        path = preview_path(row["id"])
+        if row["preview_key"] == path.stem and row["has_preview"]:
+            continue
+        if path.is_file():
+            samples.append((row["id"], path.stem, path.read_bytes()))
+    if samples:
+        voice_store.save_previews(samples)
+    logger.info("Voice library ready: %s voices; imported %s definitions and %s existing samples", len(rows), len(entries), len(samples))
+
+
+def saved_voices() -> list[dict]:
+    rows = voice_store.catalog()
+    if not rows:
+        sync_library()
+        rows = voice_store.catalog()
+    return [_public_voice(row) for row in rows]
 
 
 def prepare_previews(device: str) -> None:
@@ -47,52 +102,44 @@ def library_dir() -> Path:
 
 
 def custom_voices() -> list[dict]:
-    result = []
-    for path in sorted(library_dir().glob("clone_*.json")):
-        if not CLONE_ID.fullmatch(path.stem):
-            continue
-        data = json.loads(path.read_text(encoding="utf-8"))
-        result.append({"id": path.stem, "label": f"Giọng clone · {data['name']}", "custom": True})
-    return result
+    return [{"id": row["id"], "label": row["label"], "custom": True} for row in voice_store.catalog(custom=True)]
 
 
 def resolve_voice(voice: str):
-    if not voice.startswith("clone_"):
-        return voice
-    if not CLONE_ID.fullmatch(voice):
+    if voice.startswith("clone_") and not CLONE_ID.fullmatch(voice):
         raise ValueError("Giọng clone không hợp lệ")
-    path = library_dir() / f"{voice}.json"
-    if not path.exists():
-        raise ValueError("Không tìm thấy giọng clone đã lưu")
+    stored = voice_store.definition(voice)
+    if stored is None and voice.startswith("clone_"):
+        sync_library()
+        stored = voice_store.definition(voice)
+    if stored is None:
+        if voice.startswith("clone_"):
+            raise ValueError("Không tìm thấy giọng clone đã lưu")
+        return voice
     import numpy as np
 
-    data = json.loads(path.read_text(encoding="utf-8"))["voice"]
+    data = stored["payload"].get("voice")
+    if not data:
+        return voice
     data["speaker_emb"] = np.asarray(data["speaker_emb"], dtype=np.float32)
     if data.get("codes") is not None:
         data["codes"] = np.asarray(data["codes"], dtype=np.int64)
+        if not stored["custom"]:
+            from vieneu_utils.core_utils import strip_encoder_pad_frame
+
+            data["codes"] = strip_encoder_pad_frame(data["codes"])
     return data
 
 
 def rename_voice(voice_id: str, name: str) -> dict:
-    from app.services.tts_service import tts_service
-
     if not CLONE_ID.fullmatch(voice_id):
         raise ValueError("Chỉ đổi tên được giọng clone của bạn")
     name = name.strip()
     if not name or len(name) > 100:
         raise ValueError("Tên giọng phải có từ 1 đến 100 ký tự")
-    with tts_service._lock:
-        path = library_dir() / f"{voice_id}.json"
-        if not path.is_file():
-            raise FileNotFoundError("Không tìm thấy giọng clone")
-        data = json.loads(path.read_text(encoding="utf-8"))
-        data["name"] = name
-        temporary = path.with_suffix(".tmp")
-        try:
-            temporary.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            temporary.replace(path)
-        finally:
-            temporary.unlink(missing_ok=True)
+    if voice_store.definition(voice_id) is None:
+        sync_library()
+    voice_store.rename(voice_id, f"Giọng clone · {name}", name)
     return {"id": voice_id, "label": f"Giọng clone · {name}", "custom": True, "preview_url": preview_url(voice_id)}
 
 
@@ -128,10 +175,8 @@ def clone_voice(name: str, source: Path, device: str) -> dict:
                     "codes": np.asarray(preset["codes"], dtype=np.int64).tolist() if preset.get("codes") is not None else None,
                 }
                 payload = {"name": name, "voice": voice, "duration": duration}
-                manifest = Path(directory) / "voice.json"
-                manifest.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-                normalized.replace(library_dir() / f"{voice_id}.wav")
-                manifest.replace(library_dir() / f"{voice_id}.json")
+                voice_store.seed([{"id": voice_id, "label": f"Giọng clone · {name}", "custom": True,
+                                   "payload": payload, "reference_audio": normalized.read_bytes()}])
             finally:
                 engine.remove_voice(voice_id, save=False)
     return {"id": voice_id, "label": f"Giọng clone · {name}", "custom": True}
@@ -144,8 +189,13 @@ def preview_voice(voice: str, device: str) -> dict:
         raise ValueError("Không tìm thấy giọng đã chọn")
     destination = preview_path(voice)
     result = {"audio_url": f"/api/system/tts/previews/{destination.name}", "text": PREVIEW_TEXT}
+    if voice_store.has_preview(voice, destination.stem):
+        return result
+    # Bring existing disk samples into the DB without synthesizing them again.
+    voice_store.seed([{"id": voice, "label": voice, "custom": False, "payload": {}}])
     # Cached playback must not wait behind another voice being synthesized.
     if destination.is_file():
+        voice_store.save_previews([(voice, destination.stem, destination.read_bytes())])
         return result
     with tts_service._lock:
         directory = destination.parent
@@ -154,7 +204,10 @@ def preview_voice(voice: str, device: str) -> dict:
             temporary = destination.with_suffix(".tmp.wav")
             try:
                 tts_service.generate(PREVIEW_TEXT, voice, temporary, device, batch_size=1)
+                voice_store.save_previews([(voice, destination.stem, temporary.read_bytes())])
                 temporary.replace(destination)
             finally:
                 temporary.unlink(missing_ok=True)
+        else:
+            voice_store.save_previews([(voice, destination.stem, destination.read_bytes())])
     return result

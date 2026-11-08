@@ -26,7 +26,9 @@ $releases = Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json' -Timeout
 $release = $releases | Where-Object { $_.lts -and $_.files -contains 'win-x64-zip' } | Select-Object -First 1
 if (-not $release) { throw 'No Node.js LTS Windows x64 release found.' }
 Install-ZipTool "https://nodejs.org/dist/$($release.version)/node-$($release.version)-win-x64.zip" 'node' 'node.exe'
-Install-ZipTool 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' 'ffmpeg' 'bin\ffmpeg.exe'
+# Keep NVENC compatible with the GTX 1070 and NVIDIA driver 582.78.
+# Newer builds can require an NVENC API newer than this driver supports.
+Install-ZipTool 'https://github.com/GyanD/codexffmpeg/releases/download/8.0.1/ffmpeg-8.0.1-essentials_build.zip' 'ffmpeg' 'bin\ffmpeg.exe'
 $env:Path = "$tools\node;$tools\ffmpeg\bin;" + $env:Path
 & node --version
 & npm.cmd --version

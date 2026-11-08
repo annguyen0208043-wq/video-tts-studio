@@ -20,6 +20,8 @@ if (-not (Test-Path $FrontendDist)) {
 
 Push-Location (Join-Path $ProjectRoot "backend")
 try {
+    & $Python (Join-Path $PSScriptRoot 'start_local_postgres.py')
+    if ($LASTEXITCODE -ne 0) { throw 'Local PostgreSQL startup failed.' }
     & $Python -m alembic upgrade head
     if ($LASTEXITCODE -ne 0) { throw 'Database migration failed.' }
     & $Python -m uvicorn app.main:app --host 127.0.0.1 --port 8765

@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -112,3 +112,15 @@ class BgmTrack(Base, TimestampMixin):
     codec: Mapped[str | None] = mapped_column(String(64), nullable=True)
     tags: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class VoiceEntry(Base, TimestampMixin):
+    __tablename__ = "voice_library"
+
+    id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    label: Mapped[str] = mapped_column(String(500))
+    custom: Mapped[bool] = mapped_column(Boolean, default=False)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict, deferred=True)
+    reference_audio: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, deferred=True)
+    preview_key: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    preview_audio: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, deferred=True)

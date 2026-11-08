@@ -157,7 +157,7 @@ def test_project_media_sequence_and_real_render(tmp_path: Path):
             json={
                 "items": [
                     {
-                        "sequence_id": sequences[2]["id"],
+                        "sequence_id": sequences[0]["id"],
                         "audio_asset_id": processed_audio["id"],
                         "source_audio_policy": "replace",
                         "custom_name": "tui-do",
@@ -176,5 +176,5 @@ def test_project_media_sequence_and_real_render(tmp_path: Path):
         assert mapped_job["status"] == "completed", mapped_job.get("error_message")
         final_assets = client.get(f"/api/projects/{project_id}/assets").json()
         mapped_output = next(item for item in final_assets if item["id"] == mapped_job["output_asset_id"])
-        assert mapped_output["metadata_json"]["custom_name"] == "chien-dich-thang-9"
+        assert mapped_output["metadata_json"]["custom_name"] == mapped_job["input_json"]["group_name"]
         assert mapped_output["metadata_json"]["batch_name"] == "Tui xach loai 1"

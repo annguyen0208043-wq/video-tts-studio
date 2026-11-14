@@ -167,18 +167,27 @@ def download_asset(asset_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/assets/{asset_id}/thumbnail")
-def asset_thumbnail(asset_id: str, db: Session = Depends(get_db)):
+def asset_thumbnail(asset_id: str, v: int | None = None, db: Session = Depends(get_db)):
     asset = _asset_or_404(asset_id, db)
     if asset.type not in {"video", "output"}:
         raise HTTPException(404, "Asset không có thumbnail")
-    if asset.thumbnail_path:
+    # Versioned requests bypass legacy covers once, so cached black opening
+    # frames can be repaired without regenerating on every page load.
+    versioned_path = (
+        create_project_dirs(asset.project_id) / "thumbnails" / f"{asset_id}.v{v}.jpg"
+        if v is not None and v > 0 else None
+    )
+    if versioned_path and versioned_path.is_file():
+        db.close()
+        return FileResponse(versioned_path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+    if versioned_path is None and asset.thumbnail_path:
         path = resolve_asset_path(asset.project_id, asset.thumbnail_path)
         if path.is_file():
             db.close()
             return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
     project_id = asset.project_id
     source = resolve_asset_path(project_id, asset.relative_path)
-    path = create_project_dirs(project_id) / "thumbnails" / f"{asset_id}.jpg"
+    path = versioned_path or create_project_dirs(project_id) / "thumbnails" / f"{asset_id}.jpg"
     db.close()
     if not source.is_file():
         raise HTTPException(404, "File video không còn tồn tại")

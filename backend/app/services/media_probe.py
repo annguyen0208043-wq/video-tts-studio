@@ -85,9 +85,16 @@ def create_thumbnail(source: Path, destination: Path) -> None:
     temporary = destination.with_name(f".{destination.stem}.{uuid4().hex}.jpg")
     diagnostics = ""
     try:
-        # Pick a representative frame, avoiding an empty opening frame. Very
-        # short videos may end before 0.2 s, so retry from the beginning.
-        for offset in ("0.2", "0"):
+        # Many imported clips start with a black transition. Prefer a frame
+        # around 25% into the clip, capped at three seconds, and retain safe
+        # fallbacks for very short or unusual files.
+        try:
+            duration_ms = probe(source).get("duration_ms") or 0
+        except (OSError, ValueError):
+            duration_ms = 0
+        representative = min(max(duration_ms / 4000, 0.2), 3.0)
+        offsets = dict.fromkeys((f"{representative:.3f}", "0.2", "0"))
+        for offset in offsets:
             proc = subprocess.run(
                 ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", offset,
                  "-i", str(source), "-an", "-frames:v", "1", "-vf",

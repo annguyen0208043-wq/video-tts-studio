@@ -44,3 +44,16 @@ def test_short_portrait_video_gets_cover_and_missing_cover_is_repaired(tmp_path)
             modified = saved_path.stat().st_mtime_ns
         assert client.get(url).content == repaired.content
         assert saved_path.stat().st_mtime_ns == modified
+
+        # A versioned cover lets the UI replace legacy black thumbnails once.
+        versioned_url = f"{url}?v=2"
+        versioned = client.get(versioned_url)
+        assert versioned.status_code == 200
+        assert versioned.content.startswith(b"\xff\xd8")
+        with SessionLocal() as db:
+            row = db.get(Asset, asset["id"])
+            versioned_path = resolve_asset_path(project_id, row.thumbnail_path)
+        assert versioned_path.name == f"{asset['id']}.v2.jpg"
+        versioned_modified = versioned_path.stat().st_mtime_ns
+        assert client.get(versioned_url).content == versioned.content
+        assert versioned_path.stat().st_mtime_ns == versioned_modified

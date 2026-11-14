@@ -194,3 +194,4 @@ Nếu muốn kiểm soát chi tiết, làm theo thứ tự:
 > - File `data\credentials\` chứa mật khẩu database — không chia sẻ.
 > - `.env` chứa `DATABASE_URL` có mật khẩu — không commit lên git.
 > - Ứng dụng chỉ listen trên `127.0.0.1` — an toàn cho máy local.
+

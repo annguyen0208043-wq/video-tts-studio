@@ -18,3 +18,5 @@ frontend/vite.config.d.ts
 test-*-data/
 logs/
 run.txt
+dist-package/
+
